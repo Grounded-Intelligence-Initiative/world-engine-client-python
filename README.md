@@ -1,6 +1,6 @@
 # world-engine
 
-Remote Gym-style Python client for a [World Engine](https://github.com/M4D-SC1ENTIST/world-engine)
+Remote Gym-style Python client for a World Engine
 simulation server — a Gaussian-Splatting real-to-sim robot simulation framework.
 Your Python connects with a token, becomes the (single) controller, and drives
 the MuJoCo physics with `reset`/`step`, while every browser watching the
