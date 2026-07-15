@@ -1,7 +1,7 @@
-"""world-engine (import name ``we_client``): drive a remote World Engine sim
-with Gym semantics.
+"""world-engine-client (import name ``world_engine_client``): drive a remote
+World Engine sim with Gym semantics.
 
-    import we_client
+    import world_engine_client as we_client
     env = we_client.connect("<control token>", url="http://<host>:8080")
     obs, info = env.reset(seed=0)
     for _ in range(100):

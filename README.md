@@ -1,4 +1,4 @@
-# world-engine
+# world-engine-client
 
 Remote Gym-style Python client for a World Engine
 simulation server — a Gaussian-Splatting real-to-sim robot simulation framework.
@@ -7,11 +7,11 @@ the MuJoCo physics with `reset`/`step`, while every browser watching the
 server's `viewer.html` sees the episode live.
 
 ```bash
-pip install world-engine
+pip install world-engine-client
 ```
 
-Dependencies: numpy only. The import name is `we_client` (the `world_engine`
-module name belongs to the simulation server package).
+Dependencies: numpy only. The import name is `world_engine_client` (the
+`world_engine` module name belongs to the simulation server package).
 
 ## Usage
 
@@ -25,7 +25,7 @@ world-engine --scenes-dir scenes serve --mode simulator \
 Client side:
 
 ```python
-import we_client
+import world_engine_client as we_client
 
 env = we_client.connect("<control token>", url="http://<host>:8080")
 obs, info = env.reset(seed=0)

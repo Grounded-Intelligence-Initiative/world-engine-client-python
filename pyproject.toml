@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "world-engine"
+name = "world-engine-client"
 version = "0.1.0"
 description = "Remote Gym-style Python client for a World Engine simulation server: connect(token) -> reset/step over HTTP."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-authors = [{ name = "World Engine Contributors" }]
+authors = [{ name = "Xiatao Sun", email = "sunxiatao@gmail.com" }]
 keywords = ["robotics", "simulation", "gymnasium", "gaussian-splatting", "real2sim"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -26,11 +26,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Grounded-Intelligence-Initiative/world-engine-python"
-Repository = "https://github.com/Grounded-Intelligence-Initiative/world-engine-python"
+Homepage = "https://github.com/Grounded-Intelligence-Initiative/world-engine-client-python"
+Repository = "https://github.com/Grounded-Intelligence-Initiative/world-engine-client-python"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/we_client"]
+packages = ["src/world_engine_client"]
 
 [tool.ruff]
 line-length = 100
