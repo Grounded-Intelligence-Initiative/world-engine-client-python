@@ -37,12 +37,24 @@ class ProtocolError(WorldEngineClientError):
     """The server said something this client version does not understand."""
 
 
+class TeleopActiveError(WorldEngineClientError):
+    """Teleop is enabled in the editor — the human at the browser owns the
+    environment. Ask them to disable teleop in the Inspector (or wait)."""
+
+
+class BadConfigError(WorldEngineClientError):
+    """configure()/connect() asked for an unknown control_mode or obs key —
+    see env.metadata['supported_control_modes'] / ['supported_obs_keys']."""
+
+
 _BY_CODE = {
     "bad_token": TokenError,
     "controller_exists": ControllerConflictError,
     "reset_required": ResetRequiredError,
     "bad_session": ControllerConflictError,
     "not_connected": ProtocolError,
+    "teleop_active": TeleopActiveError,
+    "bad_config": BadConfigError,
 }
 
 

@@ -4,6 +4,15 @@ Synchronous by design — an inference loop is synchronous. Transport is plain
 HTTP POST (stdlib urllib): one round-trip per step, which the lockstep
 semantics require anyway. Obs arrays come back as JSON lists and are converted
 to numpy here; camera images are a future obs key (see the design doc §4).
+
+Proto 2 (server ≥ the editor-teleop release): the default control mode is
+``osc_pose_delta`` — a 7-dim action ``[dpos(3), drot_axisangle(3), gripper]``
+in [-1, 1] (robosuite OSC_POSE conventions; dpos scales by ``ee_step`` m,
+drot by ``ee_rot_step`` rad, gripper is a sign-driven rate). Obs use robosuite
+naming (``robot0_eef_pos``, ``robot0_eef_quat`` in scalar-last **xyzw**,
+``robot0_joint_pos`` …). Control mode + obs keys are negotiated at
+:func:`connect` or via :meth:`RemoteEnv.configure`; switches land at episode
+boundaries (immediately before the first reset, else pending until the next).
 """
 
 from __future__ import annotations
@@ -16,7 +25,7 @@ import numpy as np
 
 from .errors import WorldEngineClientError, raise_for
 
-_PROTO = 1
+_PROTO = 2
 
 
 def connect(
@@ -25,13 +34,18 @@ def connect(
     *,
     takeover: bool = False,
     timeout: float = 30.0,
+    control_mode: str | None = None,
+    obs_keys: list[str] | None = None,
 ) -> RemoteEnv:
     """Bind to the server as THE controller and return a ready RemoteEnv.
 
-    ``token`` is printed by ``world-engine serve --allow-remote-control``.
-    ``takeover=True`` revokes a controller that died without releasing."""
+    ``token`` is printed by ``world-engine serve --allow-remote-control`` (or
+    shown in the editor Inspector's Python API card during a Simulate session).
+    ``takeover=True`` revokes a controller that died without releasing.
+    ``control_mode`` / ``obs_keys`` negotiate the space at connect time (see
+    ``env.metadata['supported_control_modes']`` for what the server offers)."""
     env = RemoteEnv(url.rstrip("/"), token, timeout=timeout)
-    env._connect(takeover=takeover)
+    env._connect(takeover=takeover, control_mode=control_mode, obs_keys=obs_keys)
     return env
 
 
@@ -44,12 +58,14 @@ class RemoteEnv:
         self._timeout = timeout
         self._session_id: str | None = None
         self.metadata: dict = {}
-        self.action_dim: int = 4
+        self.action_dim: int = 7
         self.observation_keys: list[str] = []
+        self.control_mode: str | None = None
 
     # ----- Gym API ------------------------------------------------------------ #
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         reply = self._post("/control/reset", {"seed": seed})
+        self._refresh_env(reply.get("env"))
         return self._np_obs(reply["obs"]), reply.get("info", {})
 
     def step(self, action):
@@ -62,6 +78,26 @@ class RemoteEnv:
             bool(reply["truncated"]),
             reply.get("info", {}),
         )
+
+    def configure(
+        self, *, control_mode: str | None = None, obs_keys: list[str] | None = None
+    ) -> dict:
+        """Negotiate the control mode / obs keys (proto 2).
+
+        Applies immediately when no episode is active; mid-episode it is
+        recorded as PENDING and lands at the next :meth:`reset` (spaces never
+        change under a running episode). Returns the server's resolved env
+        blob; ``action_dim``/``observation_keys``/``control_mode`` refresh once
+        the switch is live (i.e. now, or after the next reset)."""
+        body: dict = {}
+        if control_mode is not None:
+            body["control_mode"] = control_mode
+        if obs_keys is not None:
+            body["obs_keys"] = list(obs_keys)
+        reply = self._post("/control/configure", body)
+        if not reply.get("pending"):
+            self._refresh_env(reply.get("env"))
+        return reply.get("env", {})
 
     def close(self) -> None:
         if self._session_id is None:
@@ -79,14 +115,31 @@ class RemoteEnv:
         self.close()
 
     # ----- wire ----------------------------------------------------------------#
-    def _connect(self, *, takeover: bool) -> None:
-        reply = self._post(
-            "/control/connect", {"proto": _PROTO, "takeover": takeover}, with_session=False
-        )
+    def _connect(
+        self,
+        *,
+        takeover: bool,
+        control_mode: str | None = None,
+        obs_keys: list[str] | None = None,
+    ) -> None:
+        body: dict = {"proto": _PROTO, "takeover": takeover}
+        if control_mode is not None:
+            body["control_mode"] = control_mode
+        if obs_keys is not None:
+            body["obs_keys"] = list(obs_keys)
+        reply = self._post("/control/connect", body, with_session=False)
         self._session_id = reply["session_id"]
-        self.metadata = reply.get("env", {})
-        self.action_dim = int(self.metadata.get("action_dim", 4))
-        self.observation_keys = list(self.metadata.get("observation_keys", []))
+        self._refresh_env(reply.get("env"))
+
+    def _refresh_env(self, env: dict | None) -> None:
+        """Track the server's resolved env blob (action space follows the
+        active control mode; a proto-1 server just reports its fixed dims)."""
+        if not env:
+            return
+        self.metadata = env
+        self.action_dim = int(env.get("action_dim", self.action_dim))
+        self.observation_keys = list(env.get("observation_keys", self.observation_keys))
+        self.control_mode = env.get("active_control_mode", self.control_mode)
 
     def _post(self, path: str, payload: dict, *, with_session: bool = True) -> dict:
         body = dict(payload)
@@ -113,7 +166,8 @@ class RemoteEnv:
             raise WorldEngineClientError(
                 f"cannot reach the World Engine server at {self._base}",
                 fixes=[
-                    "Is `world-engine serve --mode simulator --allow-remote-control` running?",
+                    "Is `world-engine serve --mode simulator --allow-remote-control` "
+                    "running (or an editor Simulate session live)?",
                     "Check the url= argument (host/port, and any SSH -L / Tailscale routing).",
                 ],
             ) from e
