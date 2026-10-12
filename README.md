@@ -10,7 +10,8 @@ server's `viewer.html` sees the episode live.
 pip install world-engine-client
 ```
 
-Dependencies: numpy only. The import name is `world_engine_client` (the
+Base dependencies: numpy only. Install `world-engine-client[img,gym]` for
+optional Pillow decoding and the Gymnasium adapter. The import name is `world_engine_client` (the
 `world_engine` module name belongs to the simulation server package).
 
 ## Usage
@@ -45,16 +46,30 @@ is shown in the editor Inspector's **Python API** card (copy / edit /
 regenerate it there):
 
 ```python
-env = we_client.connect("<token from the Inspector>", url="http://<host>:8080")
-obs, info = env.reset()
+env = we_client.connect("<token from the Inspector>", url="http://<host>:8080",
+                        mode="resume", images=True)
+obs, info = env.observe()  # preserves the current attempt; no physics advance
 obs, reward, term, trunc, info = env.step([0.2, 0, 0, 0, 0, 0, 0])
 ```
 
-If the editor user has **teleop enabled**, `step()` raises `TeleopActiveError`
-(the human owns the environment) — ask them to disable teleop in the
-Inspector, or wait. `connect()`/`reset()` remain allowed.
+Resume attachment rejects active human teleoperation with `TeleopActiveError`.
+For hosted DigiArena sessions use `digiarena.attach(hosted_session_id)`; browser
+cookies and editor write credentials are not Python control credentials.
 
-## Action & observation space (proto 2)
+Protocol 3 is the default. Direct connections remain reset-required and state-only
+unless requested otherwise. `proto=2` preserves state-only compatibility and
+rejects image/resume requests. Image-enabled operation requires a real GPU renderer
+on the server. `images=True` captures all configured cameras; `cameras=['wrist']`
+selects a subset. RGB arrays appear in `obs['rgb']`; `render()` returns the latest
+camera without stepping. `as_gymnasium()` supplies an optional Gymnasium Env.
+Observations identify the instance, episode, step, and simulation time in `info`.
+
+Heartbeats run every 30 seconds with a 90-second controller lease. Expiry freezes
+the simulation until explicit takeover. A lost action response is never retried:
+`RecoveryRequiredError` blocks further steps until explicit reset/reconnection.
+Pending recording data blocks reset with `RecordingPendingError` and is preserved.
+
+## Action & observation space
 
 The default control mode is **`osc_pose_delta`** — robosuite OSC_POSE
 conventions:
@@ -113,6 +128,9 @@ R = rot6d_to_matrix(demo["action_dict/abs_rot_6d"][t])
   a dead session.
 - After `terminated`/`truncated` you must `reset()` (Gym semantics — the server
   refuses further steps with `reset_required`).
+- `env.action_space` / `env.observation_space` are Gymnasium spaces for the
+  negotiated control mode and cameras (needs the `gym` extra); `env.as_gymnasium()`
+  returns a full `gymnasium.Env`.
 - `RemoteEnv` is a context manager: `with we_client.connect(...) as env:`
   releases the controller lock on exit.
 - Errors are typed (`TokenError`, `ControllerConflictError`,
@@ -122,8 +140,10 @@ R = rot6d_to_matrix(demo["action_dict/abs_rot_6d"][t])
 ## Development
 
 ```bash
-pip install -e . && python -m pytest
+pip install -e '.[img,gym]' pytest && python -m pytest
 ```
 
-The wire-contract tests (real client against a real server) live in the server
-repo: `tests/test_remote_control.py` and `tests/test_teleop_channel.py`.
+`tests/` covers the client alone against a stub server: binary decoding, the
+never-retry / recovery rules, heartbeats and Gymnasium spaces. The wire-contract
+tests (real client against a real server) live in the server repo:
+`tests/test_remote_*.py` and `tests/test_teleop_channel.py`.

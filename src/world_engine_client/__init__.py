@@ -5,7 +5,7 @@ World Engine sim with Gym semantics.
     env = we_client.connect("<control token>", url="http://<host>:8080")
     obs, info = env.reset(seed=0)
     for _ in range(100):
-        # default (proto 2): 7-dim [dpos(3), drot_axisangle(3), gripper] in [-1,1]
+        # 7-dim [dpos(3), drot_axisangle(3), gripper] in [-1,1]
         obs, reward, terminated, truncated, info = env.step([0.1, 0, -0.2, 0, 0, 0, -1])
         if terminated or truncated:
             obs, info = env.reset()
@@ -23,6 +23,8 @@ from .errors import (
     BadConfigError,
     ControllerConflictError,
     ProtocolError,
+    RecordingPendingError,
+    RecoveryRequiredError,
     ResetRequiredError,
     TeleopActiveError,
     TokenError,
@@ -45,9 +47,11 @@ __all__ = [
     "ProtocolError",
     "TeleopActiveError",
     "BadConfigError",
+    "RecoveryRequiredError",
+    "RecordingPendingError",
     "matrix_to_rot6d",
     "rot6d_to_matrix",
     "axisangle_to_matrix",
     "matrix_to_axisangle",
 ]
-__version__ = "0.2.0"
+__version__ = "0.3.0"

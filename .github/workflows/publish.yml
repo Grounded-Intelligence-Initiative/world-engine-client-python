@@ -1,6 +1,6 @@
 # Publish to PyPI via Trusted Publishing (OIDC — no API token stored anywhere).
 # Trigger: pushing a version tag (v0.1.0). One-time setup on pypi.org required:
-# add this repo+workflow as a "pending publisher" for the `world-engine` project
+# add this repo+workflow as a "pending publisher" for the `world-engine-client` project
 # (see README of the release process / the PR that added this file).
 name: publish
 
