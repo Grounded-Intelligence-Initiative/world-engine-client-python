@@ -118,6 +118,21 @@ def test_a_server_without_client_rendering_is_released(client_render):
     assert client_render.paths()[-1] == "/control/release"
 
 
+def test_auto_keeps_server_rendering_with_an_older_server(client_render):
+    client_render.responders["/control/connect"] = lambda body: {
+        "ok": True,
+        "session_id": "sess",
+        "proto": 3,
+        "instance_id": "inst",
+        "episode_id": "e0",
+        "env": {**copy.deepcopy(ENV), "cameras": CAMERAS},
+    }
+    env = wec.connect("secret", url=client_render.url, images=True)
+    assert client_render.calls[0][1]["render"] == "client"  # asked, not honoured
+    assert env.renderer is None and FakeRenderer.instances == []
+    env.close()
+
+
 def test_a_render_failure_leaves_physics_and_observe_renders_again(client_render):
     env = wec.connect("secret", url=client_render.url, images=True)
     env.reset(seed=0)

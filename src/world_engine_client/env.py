@@ -292,10 +292,14 @@ class RemoteEnv:
         if proto == 3:
             self._episode_id = reply.get("episode_id")
         self._refresh_env(reply.get("env"))
-        if local:
-            bundle = reply.get("render")
-            if not bundle or bundle.get("protocol") != 1:
+        bundle = reply.get("render") if local else None
+        if local and (not bundle or bundle.get("protocol") != 1):
+            if self._render_request == "local":
                 raise ProtocolError("server does not support client rendering; use render='server'")
+            # An older server ignores render="client" and renders the images
+            # itself: carry on with what it sends.
+            local = False
+        if local:
             from .render import LocalRenderer
 
             self.renderer = LocalRenderer(
