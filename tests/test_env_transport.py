@@ -4,13 +4,11 @@ The rule under test: a request whose outcome is unknown is never retried, and
 step/reset failures block further actions until an explicit reset or reconnect.
 """
 
-import copy
-import sys
 import threading
 
 import numpy as np
 import pytest
-from conftest import CONTENT_TYPE, DROP, ENV, OBS, jpeg, pack
+from conftest import DROP, ENV, OBS
 
 import world_engine_client as wec
 from world_engine_client import env as env_module
@@ -284,48 +282,6 @@ def test_render_requires_an_image_observation(env):
     env.observe()
     with pytest.raises(wec.WorldEngineClientError, match="images=True"):
         env.render()
-
-
-def image_env(stub):
-    with_cameras = {**copy.deepcopy(ENV), "cameras": CAMERAS, "available_cameras": CAMERAS}
-    stub.responders["/control/connect"] = lambda body: {
-        "ok": True,
-        "session_id": "sess",
-        "proto": 3,
-        "instance_id": "inst",
-        "episode_id": "e0",
-        "env": with_cameras,
-    }
-    return wec.connect("secret", url=stub.url, images=True, render="server")
-
-
-def test_binary_image_reply_decodes_and_reports_timings(stub):
-    env = image_env(stub)
-    assert stub.calls[0][1]["images"] is True
-    header = {"ok": True, "obs": OBS, "info": {"episode_id": "e0", "timings": {"server_ms": 1}}}
-    packet = pack(header, [("front", 8, 6, jpeg(8, 6))])
-    stub.responders["/control/observe"] = lambda body: (CONTENT_TYPE, packet)
-    obs, info = env.observe()
-    assert obs["rgb"]["front"].shape == (6, 8, 3)
-    assert env.render() is obs["rgb"]["front"] and env.render("front") is obs["rgb"]["front"]
-    assert {"decode_ms", "transport_ms", "total_ms", "server_ms"} <= set(env.last_timings)
-    assert env.last_timings["response_bytes"] == len(packet)
-    assert env.last_timings["transport_ms"] >= 0
-    env.close()
-
-
-def test_image_session_rejects_a_json_downgrade(stub):
-    env = image_env(stub)
-    with pytest.raises(wec.ProtocolError, match="malformed observation"):
-        env.observe()
-    env.close()
-
-
-def test_images_without_pillow_fail_before_any_request(stub, monkeypatch):
-    monkeypatch.setitem(sys.modules, "PIL", None)
-    with pytest.raises(ImportError, match=r"world-engine-client\[img\]"):
-        wec.connect("secret", url=stub.url, cameras=["front"], render="server")
-    assert stub.calls == []
 
 
 class Ticks:

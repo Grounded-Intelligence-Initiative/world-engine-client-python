@@ -4,7 +4,6 @@ These tests exercise the client alone. The wire contract against a real engine
 is covered in the server repository (tests/test_remote_*.py).
 """
 
-import io
 import json
 import socket
 import threading
@@ -12,7 +11,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-CONTENT_TYPE = "application/vnd.world-engine.observation-v3"
 DROP = object()  # responder return value: close the socket without replying
 
 ENV = {
@@ -31,25 +29,6 @@ ENV = {
     "cameras": {},
 }
 OBS = {"robot0_eef_pos": [0.1, 0.2, 0.3], "object_ids": ["cube"]}
-
-
-def jpeg(width, height, color=(200, 30, 30)):
-    from PIL import Image
-
-    buf = io.BytesIO()
-    Image.new("RGB", (width, height), color).save(buf, format="JPEG", quality=90)
-    return buf.getvalue()
-
-
-def pack(header, chunks, specs=None):
-    """Protocol-3 packet: u32 length, JSON envelope, concatenated JPEGs."""
-    if specs is None:
-        specs, offset = [], 0
-        for name, w, h, data in chunks:
-            specs.append({"name": name, "w": w, "h": h, "offset": offset, "length": len(data)})
-            offset += len(data)
-    meta = json.dumps({"wire_version": 3, **header, "images": specs}).encode()
-    return len(meta).to_bytes(4, "little") + meta + b"".join(c[3] for c in chunks)
 
 
 class ControlStub:

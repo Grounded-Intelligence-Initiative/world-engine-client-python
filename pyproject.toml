@@ -28,7 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 img = ["Pillow>=10"]
 gym = ["gymnasium>=1.0"]
-# Camera images rendered on this machine (render="local"); also run
+# Camera images, rendered on this machine; also run
 # `python -m playwright install chromium` unless Chrome is installed.
 render = ["Pillow>=10", "playwright>=1.40", "websockets>=12"]
 

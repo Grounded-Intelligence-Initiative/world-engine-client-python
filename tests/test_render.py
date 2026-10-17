@@ -1,5 +1,5 @@
-"""Client rendering (render="local") without a browser: mode selection, the
-render_state hand-off, credentials on asset requests and the digest cache."""
+"""Client rendering without a browser: the extra requirement, the render_state
+hand-off, credentials on asset requests and the digest cache."""
 
 import copy
 import hashlib
@@ -62,10 +62,19 @@ def client_render(stub, monkeypatch):
             "info": {"episode_id": "e1", "step_id": 0},
             "render_state": STATE,
         }
+    stub.responders["/control/step"] = lambda body: {
+        "ok": True,
+        "obs": dict(OBS),
+        "info": {"episode_id": "e1", "step_id": 1},
+        "reward": 0.0,
+        "terminated": False,
+        "truncated": False,
+        "render_state": STATE,
+    }
     return stub
 
 
-def test_auto_renders_locally_when_the_extra_is_installed(client_render):
+def test_images_are_rendered_locally(client_render):
     env = wec.connect("secret", url=client_render.url, images=True, render_options={"x": 1})
     connect = client_render.calls[0][1]
     assert connect["render"] == "client" and connect["images"] is True
@@ -78,30 +87,19 @@ def test_auto_renders_locally_when_the_extra_is_installed(client_render):
     assert fake.closed and client_render.paths()[-1] == "/control/release"
 
 
-def test_auto_falls_back_to_the_server_without_the_extra(stub, monkeypatch):
-    monkeypatch.setattr(render_module, "available", lambda: False)
-    env = {**copy.deepcopy(ENV), "cameras": CAMERAS}
-    stub.responders["/control/connect"] = lambda body: {
-        "ok": True,
-        "session_id": "sess",
-        "proto": 3,
-        "instance_id": "inst",
-        "episode_id": "e0",
-        "env": env,
-    }
-    remote = wec.connect("secret", url=stub.url, images=True)
-    assert "render" not in stub.calls[0][1]
-    assert remote.renderer is None
-    remote.close()
-
-
-def test_local_without_the_extra_fails_before_any_request(stub, monkeypatch):
+@pytest.mark.parametrize("kw", [{"images": True}, {"cameras": ["front"]}])
+def test_images_without_the_extra_fail_before_any_request(stub, monkeypatch, kw):
     monkeypatch.setattr(render_module, "available", lambda: False)
     with pytest.raises(wec.RendererError, match=r"render\]"):
-        wec.connect("secret", url=stub.url, images=True, render="local")
+        wec.connect("secret", url=stub.url, **kw)
     assert stub.calls == []
-    with pytest.raises(ValueError):
-        wec.connect("secret", url=stub.url, render="browser")
+
+
+@pytest.mark.parametrize("mode", ["server", "browser"])
+def test_servers_never_render(stub, mode):
+    with pytest.raises(ValueError, match="no longer render"):
+        wec.connect("secret", url=stub.url, images=True, render=mode)
+    assert stub.calls == []
 
 
 def test_a_server_without_client_rendering_is_released(client_render):
@@ -113,24 +111,9 @@ def test_a_server_without_client_rendering_is_released(client_render):
         "episode_id": "e0",
         "env": {**copy.deepcopy(ENV), "cameras": CAMERAS},
     }
-    with pytest.raises(wec.ProtocolError, match="render='server'"):
-        wec.connect("secret", url=client_render.url, images=True, render="local")
+    with pytest.raises(wec.ProtocolError, match="predates client rendering"):
+        wec.connect("secret", url=client_render.url, images=True)
     assert client_render.paths()[-1] == "/control/release"
-
-
-def test_auto_keeps_server_rendering_with_an_older_server(client_render):
-    client_render.responders["/control/connect"] = lambda body: {
-        "ok": True,
-        "session_id": "sess",
-        "proto": 3,
-        "instance_id": "inst",
-        "episode_id": "e0",
-        "env": {**copy.deepcopy(ENV), "cameras": CAMERAS},
-    }
-    env = wec.connect("secret", url=client_render.url, images=True)
-    assert client_render.calls[0][1]["render"] == "client"  # asked, not honoured
-    assert env.renderer is None and FakeRenderer.instances == []
-    env.close()
 
 
 def test_a_render_failure_leaves_physics_and_observe_renders_again(client_render):
@@ -143,7 +126,20 @@ def test_a_render_failure_leaves_physics_and_observe_renders_again(client_render
     fake.fail = False
     obs, _ = env.observe()
     assert obs["rgb"]["front"][0, 0, 0] == 2
-    env.step([0, 0, 0, 0])  # no render_state: actions are not blocked
+    obs, *_ = env.step([0, 0, 0, 0])  # the failed render blocked no action
+    assert obs["rgb"]["front"][0, 0, 0] == 3
+    env.close()
+
+
+def test_an_observation_without_poses_is_a_protocol_error(client_render):
+    env = wec.connect("secret", url=client_render.url, images=True)
+    client_render.responders["/control/observe"] = lambda body: {
+        "ok": True,
+        "obs": dict(OBS),
+        "info": {"episode_id": "e1", "step_id": 0},
+    }
+    with pytest.raises(wec.ProtocolError, match="malformed observation"):
+        env.observe()
     env.close()
 
 

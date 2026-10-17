@@ -56,8 +56,7 @@ def matrix_to_axisangle(m: np.ndarray) -> np.ndarray:
         if m[0, 2] + m[2, 0] < 0:
             axis[2] = -axis[2]
         return axis * angle
-    axis = (
-        np.array([m[2, 1] - m[1, 2], m[0, 2] - m[2, 0], m[1, 0] - m[0, 1]])
-        / (2.0 * np.sin(angle))
+    axis = np.array([m[2, 1] - m[1, 2], m[0, 2] - m[2, 0], m[1, 0] - m[0, 1]]) / (
+        2.0 * np.sin(angle)
     )
     return axis * angle

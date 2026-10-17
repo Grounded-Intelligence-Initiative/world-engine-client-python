@@ -3,7 +3,8 @@
 Synchronous by design — an inference loop is synchronous. Transport is plain
 HTTP POST (persistent stdlib http.client): one round-trip per step, which the lockstep
 semantics require anyway. Obs arrays come back as JSON lists and are converted
-to numpy here; protocol 3 carries synchronized JPEG camera observations.
+to numpy here. Camera images are rendered on this machine (see render.py): the
+server sends the poses they are drawn from with every observation.
 
 Proto 2 (server ≥ the editor-teleop release): the default control mode is
 ``osc_pose_delta`` — a 7-dim action ``[dpos(3), drot_axisangle(3), gripper]``
@@ -26,7 +27,8 @@ import urllib.parse
 import numpy as np
 
 from .errors import ProtocolError, RecoveryRequiredError, WorldEngineClientError, raise_for
-from .wire import CONTENT_TYPE, MAX_RESPONSE, decode
+
+MAX_RESPONSE = 64 * 1024 * 1024
 
 _PROTO = 3
 
@@ -56,14 +58,14 @@ def connect(
     ``control_mode`` / ``obs_keys`` negotiate the space at connect time (see
     ``env.metadata['supported_control_modes']`` for what the server offers).
 
-    ``render`` picks who draws camera images: ``"local"`` renders them on this
-    machine in headless Chrome (needs the ``render`` extra; the server only
-    simulates), ``"server"`` asks the server to render them, and ``"auto"``
-    renders locally when the extra is installed. ``render_options`` go to
+    Camera images (``images=True`` or ``cameras=[...]``) are rendered on this
+    machine in headless Chrome; the server only simulates. That needs the
+    ``render`` extra. ``render`` accepts ``"auto"`` or ``"local"`` (the same
+    thing; kept for callers that pass it). ``render_options`` go to
     :class:`world_engine_client.render.LocalRenderer` (``cache_dir``,
     ``allow_software``, ``chrome_args``)."""
-    if render not in ("auto", "local", "server"):
-        raise ValueError("render must be 'auto', 'local' or 'server'")
+    if render not in ("auto", "local"):
+        raise ValueError("render must be 'auto' or 'local': servers no longer render camera images")
     env = RemoteEnv(url.rstrip("/"), token, timeout=timeout)
     env._access_provider = access_provider
     env._render_request = render
@@ -252,23 +254,16 @@ class RemoteEnv:
         expected_instance_id=None,
         proto=_PROTO,
     ) -> None:
-        local = False
-        if images or cameras:
+        local = bool(images or cameras)
+        if local:
             from . import render as local_render
 
-            local = self._render_request == "local" or (
-                self._render_request == "auto" and local_render.available()
-            )
-            if local and not local_render.available():
+            if not local_render.available():
                 raise local_render.RendererError(
-                    "render='local' needs the render extra",
+                    "camera images are rendered on this machine and need the render extra",
                     code="renderer_unavailable",
                     fixes=local_render._INSTALL_FIXES,
                 )
-            try:
-                import PIL  # noqa: F401
-            except ImportError as exc:
-                raise ImportError("Install world-engine-client[img] for images") from exc
         body: dict = {
             "proto": proto,
             "takeover": takeover,
@@ -294,11 +289,9 @@ class RemoteEnv:
         self._refresh_env(reply.get("env"))
         bundle = reply.get("render") if local else None
         if local and (not bundle or bundle.get("protocol") != 1):
-            if self._render_request == "local":
-                raise ProtocolError("server does not support client rendering; use render='server'")
-            # An older server ignores render="client" and renders the images
-            # itself: carry on with what it sends.
-            local = False
+            raise ProtocolError(
+                "this server predates client rendering; upgrade it, or connect with images=False"
+            )
         if local:
             from .render import LocalRenderer
 
@@ -349,19 +342,7 @@ class RemoteEnv:
                 if len(data) > MAX_RESPONSE:
                     raise ProtocolError("response exceeds size limit")
                 received = time.perf_counter()
-                if response.getheader("Content-Type", "").split(";")[0] == CONTENT_TYPE:
-                    reply = decode(data, self.metadata.get("cameras", {}))
-                    decoded = time.perf_counter()
-                    server_ms = reply.get("info", {}).get("timings", {}).get("server_ms", 0)
-                    self.last_timings = {
-                        **reply.get("info", {}).get("timings", {}),
-                        "decode_ms": (decoded - received) * 1000,
-                        "transport_ms": max(0, (received - started) * 1000 - server_ms),
-                        "total_ms": (decoded - started) * 1000,
-                        "response_bytes": len(data),
-                    }
-                else:
-                    reply = json.loads(data)
+                reply = json.loads(data)
                 if not isinstance(reply, dict) or "ok" not in reply:
                     raise ProtocolError("invalid response envelope")
             except (OSError, http.client.HTTPException, ValueError, ProtocolError) as exc:
@@ -374,12 +355,8 @@ class RemoteEnv:
                 raise ProtocolError(f"request failed at {path}: {exc}") from exc
             if reply.get("ok") and path in ("/control/reset", "/control/step", "/control/observe"):
                 try:
-                    if (
-                        self.metadata.get("cameras")
-                        and self.renderer is None
-                        and response.getheader("Content-Type", "").split(";")[0] != CONTENT_TYPE
-                    ):
-                        raise ValueError("image observation silently downgraded to JSON")
+                    if self.renderer is not None and "render_state" not in reply:
+                        raise ValueError("observation without the poses to render")
                     if not isinstance(reply["obs"], dict) or not isinstance(reply["info"], dict):
                         raise ValueError("invalid observation or info")
                     for key, spec in (
@@ -409,10 +386,22 @@ class RemoteEnv:
                 if reply.get("code") == "recovery_required":
                     self._uncertain = True
                 raise_for(reply)
-        if self.renderer is not None and "render_state" in reply:
+        if path not in ("/control/reset", "/control/step", "/control/observe"):
+            return reply
+        server_ms = reply["info"].get("timings", {}).get("server_ms", 0)
+        timings = {
+            "server_ms": server_ms,
+            "transport_ms": max(0, (received - started) * 1000 - server_ms),
+            "response_bytes": len(data),
+        }
+        if self.renderer is not None:
             # Outside the lock: the heartbeat must not wait for a frame. A
             # render failure leaves physics as stepped; observe() renders again.
+            rendering = time.perf_counter()
             reply["obs"]["rgb"] = self.renderer.render(reply["render_state"])
+            timings["render_ms"] = (time.perf_counter() - rendering) * 1000
+        timings["total_ms"] = (time.perf_counter() - started) * 1000
+        self.last_timings = timings
         return reply
 
     def _open_render(self, path: str):

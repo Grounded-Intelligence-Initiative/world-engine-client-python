@@ -63,21 +63,19 @@ rejects image/resume requests. `images=True` captures all configured cameras;
 returns the latest camera without stepping. `as_gymnasium()` supplies an optional
 Gymnasium Env.
 
-### Rendering camera images on your machine
+### Camera images
 
-With the `render` extra, camera images are drawn on your computer: the server only
+Camera images are drawn on your computer, never on the server: the server only
 simulates physics and sends the poses with each observation, and a headless Chrome
-here runs the same page the server-side renderer runs. It needs no GPU on the
-server, nothing is throttled when no browser tab is open, and the images never
-travel over the network.
+here runs the same scene the browser viewer shows. Nothing is throttled when no
+browser tab is open, and the images never travel over the network. This needs the
+`render` extra:
 
 ```bash
 pip install 'world-engine-client[render]'
 python -m playwright install chromium     # skip if Google Chrome is installed
 ```
 
-`render="auto"` (the default) renders locally when the extra is installed and
-asks the server otherwise; `render="local"` or `render="server"` force one.
 Scene assets are fetched once per session and cached by content hash in a
 temporary directory that `close()` deletes; pass
 `render_options={"cache_dir": "..."}` to keep them across sessions. Chrome must
@@ -85,7 +83,7 @@ get hardware WebGL (check `chrome://gpu`). Without it the renderer refuses to
 start, because software rendering manages only a few frames per second;
 `render_options={"allow_software": True}` accepts that, and the
 `WE_RENDER_CHROME_ARGS` environment variable overrides Chrome's flags.
-Observations identify the instance, episode, step, and simulation time in `info`.
+`env.last_timings` splits each step into server, transport and render time.
 
 Heartbeats run every 30 seconds with a 90-second controller lease. Expiry freezes
 the simulation until explicit takeover. A lost action response is never retried:
