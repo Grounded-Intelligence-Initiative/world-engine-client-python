@@ -8,7 +8,7 @@ import io
 import json
 import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -60,6 +60,7 @@ class ControlStub:
         self.responders = {}
         self.step_id = 0
         self.episode = 0
+        self.files = {}  # GET path -> bytes (the /render/ prefix)
 
     def default(self, path, body):
         path = path[path.index("/control/") :]  # tolerate a gateway prefix
@@ -126,10 +127,25 @@ def stub():
             self.end_headers()
             self.wfile.write(data)
 
+        def do_GET(self):
+            state.calls.append((self.path, None, dict(self.headers)))
+            data = state.files.get(self.path)
+            if data is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     state.url = f"http://127.0.0.1:{server.server_address[1]}"
     yield state

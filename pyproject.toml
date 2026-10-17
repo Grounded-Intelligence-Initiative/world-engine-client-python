@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "world-engine-client"
-version = "0.3.0"
+version = "0.4.0"
 description = "Remote Gym-style Python client for a World Engine simulation server: connect(token) -> reset/step over HTTP."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,9 @@ dependencies = [
 [project.optional-dependencies]
 img = ["Pillow>=10"]
 gym = ["gymnasium>=1.0"]
+# Camera images rendered on this machine (render="local"); also run
+# `python -m playwright install chromium` unless Chrome is installed.
+render = ["Pillow>=10", "playwright>=1.40", "websockets>=12"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff", "Pillow>=10", "gymnasium>=1.0"]

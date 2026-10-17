@@ -45,6 +45,8 @@ def connect(
     expected_instance_id: str | None = None,
     proto: int = _PROTO,
     access_provider=None,
+    render: str = "auto",
+    render_options: dict | None = None,
 ) -> RemoteEnv:
     """Bind to the server as THE controller and return a ready RemoteEnv.
 
@@ -52,9 +54,20 @@ def connect(
     shown in the editor Inspector's Python API card during a Simulate session).
     ``takeover=True`` revokes a controller that died without releasing.
     ``control_mode`` / ``obs_keys`` negotiate the space at connect time (see
-    ``env.metadata['supported_control_modes']`` for what the server offers)."""
+    ``env.metadata['supported_control_modes']`` for what the server offers).
+
+    ``render`` picks who draws camera images: ``"local"`` renders them on this
+    machine in headless Chrome (needs the ``render`` extra; the server only
+    simulates), ``"server"`` asks the server to render them, and ``"auto"``
+    renders locally when the extra is installed. ``render_options`` go to
+    :class:`world_engine_client.render.LocalRenderer` (``cache_dir``,
+    ``allow_software``, ``chrome_args``)."""
+    if render not in ("auto", "local", "server"):
+        raise ValueError("render must be 'auto', 'local' or 'server'")
     env = RemoteEnv(url.rstrip("/"), token, timeout=timeout)
     env._access_provider = access_provider
+    env._render_request = render
+    env._render_options = dict(render_options or {})
     try:
         env._connect(
             takeover=takeover,
@@ -66,8 +79,8 @@ def connect(
             expected_instance_id=expected_instance_id,
             proto=proto,
         )
-    except Exception:
-        env._http.close()
+    except BaseException:
+        env.close()
         raise
     return env
 
@@ -105,6 +118,9 @@ class RemoteEnv:
         self.action_dim: int = 7
         self.observation_keys: list[str] = []
         self.control_mode: str | None = None
+        self._render_request = "server"
+        self._render_options: dict = {}
+        self.renderer = None  # LocalRenderer when images are rendered on this machine
 
     # ----- Gym API ------------------------------------------------------------ #
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -204,6 +220,9 @@ class RemoteEnv:
         self._stop.set()
         if self._heartbeat_thread is not None:
             self._heartbeat_thread.join(timeout=self._timeout + 1)
+        if self.renderer is not None:
+            self.renderer.close()
+            self.renderer = None
         if self._session_id is None:
             self._http.close()
             return
@@ -233,7 +252,19 @@ class RemoteEnv:
         expected_instance_id=None,
         proto=_PROTO,
     ) -> None:
+        local = False
         if images or cameras:
+            from . import render as local_render
+
+            local = self._render_request == "local" or (
+                self._render_request == "auto" and local_render.available()
+            )
+            if local and not local_render.available():
+                raise local_render.RendererError(
+                    "render='local' needs the render extra",
+                    code="renderer_unavailable",
+                    fixes=local_render._INSTALL_FIXES,
+                )
             try:
                 import PIL  # noqa: F401
             except ImportError as exc:
@@ -250,6 +281,8 @@ class RemoteEnv:
             body["control_mode"] = control_mode
         if obs_keys is not None:
             body["obs_keys"] = list(obs_keys)
+        if local:
+            body["render"] = "client"
         reply = self._post("/control/connect", body, with_session=False)
         if reply.get("proto") != proto:
             raise ProtocolError("server did not honor the requested protocol")
@@ -259,6 +292,15 @@ class RemoteEnv:
         if proto == 3:
             self._episode_id = reply.get("episode_id")
         self._refresh_env(reply.get("env"))
+        if local:
+            bundle = reply.get("render")
+            if not bundle or bundle.get("protocol") != 1:
+                raise ProtocolError("server does not support client rendering; use render='server'")
+            from .render import LocalRenderer
+
+            self.renderer = LocalRenderer(
+                self._open_render, bundle["scene_init"], bundle["digests"], **self._render_options
+            )
         if proto == 3:
             self._heartbeat_thread = threading.Thread(target=self._heartbeat, daemon=True)
             self._heartbeat_thread.start()
@@ -330,6 +372,7 @@ class RemoteEnv:
                 try:
                     if (
                         self.metadata.get("cameras")
+                        and self.renderer is None
                         and response.getheader("Content-Type", "").split(";")[0] != CONTENT_TYPE
                     ):
                         raise ValueError("image observation silently downgraded to JSON")
@@ -362,7 +405,33 @@ class RemoteEnv:
                 if reply.get("code") == "recovery_required":
                     self._uncertain = True
                 raise_for(reply)
-            return reply
+        if self.renderer is not None and "render_state" in reply:
+            # Outside the lock: the heartbeat must not wait for a frame. A
+            # render failure leaves physics as stepped; observe() renders again.
+            reply["obs"]["rgb"] = self.renderer.render(reply["render_state"])
+        return reply
+
+    def _open_render(self, path: str):
+        """GET <server>/render<path> with this session's credentials, on its own
+        connection (the renderer runs on another thread)."""
+        parsed = urllib.parse.urlsplit(self._base)
+        transport = (
+            http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        )
+        conn = transport(parsed.hostname, parsed.port, timeout=max(self._timeout, 120))
+        headers = {"X-We-Control-Token": self._token}
+        if self._access_provider:
+            headers["Authorization"] = "Bearer " + self._access_provider()
+        conn.request("GET", self._prefix + "/render" + path, headers=headers)
+        response = conn.getresponse()
+        if response.status == 404:
+            conn.close()
+            raise FileNotFoundError(path)
+        if response.status != 200:
+            detail = response.read(500).decode("utf-8", "replace")
+            conn.close()
+            raise OSError(f"HTTP {response.status} for {path}: {detail}")
+        return _Owned(response, conn)
 
     @staticmethod
     def _np_obs(obs: dict) -> dict:
@@ -377,3 +446,19 @@ class RemoteEnv:
             else:
                 out[k] = v
         return out
+
+
+class _Owned:
+    """A response that closes its connection when the caller is done."""
+
+    def __init__(self, response, conn):
+        self._response, self._conn = response, conn
+
+    def read(self, *a):
+        return self._response.read(*a)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._conn.close()

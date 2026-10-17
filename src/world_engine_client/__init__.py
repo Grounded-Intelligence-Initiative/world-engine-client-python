@@ -30,6 +30,7 @@ from .errors import (
     TokenError,
     WorldEngineClientError,
 )
+from .render import RendererError
 from .rotations import (
     axisangle_to_matrix,
     matrix_to_axisangle,
@@ -49,9 +50,10 @@ __all__ = [
     "BadConfigError",
     "RecoveryRequiredError",
     "RecordingPendingError",
+    "RendererError",
     "matrix_to_rot6d",
     "rot6d_to_matrix",
     "axisangle_to_matrix",
     "matrix_to_axisangle",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"

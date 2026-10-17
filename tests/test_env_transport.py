@@ -296,7 +296,7 @@ def image_env(stub):
         "episode_id": "e0",
         "env": with_cameras,
     }
-    return wec.connect("secret", url=stub.url, images=True)
+    return wec.connect("secret", url=stub.url, images=True, render="server")
 
 
 def test_binary_image_reply_decodes_and_reports_timings(stub):
@@ -324,7 +324,7 @@ def test_image_session_rejects_a_json_downgrade(stub):
 def test_images_without_pillow_fail_before_any_request(stub, monkeypatch):
     monkeypatch.setitem(sys.modules, "PIL", None)
     with pytest.raises(ImportError, match=r"world-engine-client\[img\]"):
-        wec.connect("secret", url=stub.url, cameras=["front"])
+        wec.connect("secret", url=stub.url, cameras=["front"], render="server")
     assert stub.calls == []
 
 
