@@ -36,23 +36,31 @@ import numpy as np
 
 from .errors import WorldEngineClientError
 
-# Hardware WebGL in headless Chrome, per platform. The Linux flags are the ones
-# the server renderer is verified with (NVIDIA through Vulkan ANGLE); macOS uses
-# Metal; Windows uses Chrome's default (D3D11). WE_RENDER_CHROME_ARGS overrides.
+# Hardware WebGL in headless Chrome, per platform, tried in order until one
+# loads the scene on a GPU and renders a frame. On Linux, ANGLE over native
+# EGL/GLES works on NVIDIA RTX 4090 (driver 580), where ANGLE over Vulkan hangs
+# on the first frame; the Vulkan set is the one the server renderer was
+# verified with on an RTX 6000 Ada. macOS uses Metal; Windows Chrome's default
+# (D3D11). WE_RENDER_CHROME_ARGS or chrome_args replaces the list.
 if sys.platform == "darwin":
-    _CHROME_ARGS = ["--headless=new", "--use-angle=metal", "--ignore-gpu-blocklist"]
+    _CANDIDATES = [["--headless=new", "--use-angle=metal", "--ignore-gpu-blocklist"]]
 elif sys.platform.startswith("linux"):
-    _CHROME_ARGS = [
-        "--headless=new",
-        "--ozone-platform=headless",
-        "--use-angle=vulkan",
-        "--enable-features=Vulkan",
-        "--use-gl=angle",
-        "--ignore-gpu-blocklist",
-        "--no-sandbox",
+    _CANDIDATES = [
+        ["--headless=new", "--use-gl=angle", "--use-angle=gl-egl", "--ignore-gpu-blocklist"],
+        [
+            "--headless=new",
+            "--ozone-platform=headless",
+            "--use-angle=vulkan",
+            "--enable-features=Vulkan",
+            "--use-gl=angle",
+            "--ignore-gpu-blocklist",
+        ],
     ]
+    _CANDIDATES = [c + ["--no-sandbox"] for c in _CANDIDATES]
 else:
-    _CHROME_ARGS = ["--headless=new", "--ignore-gpu-blocklist"]
+    _CANDIDATES = [["--headless=new", "--ignore-gpu-blocklist"]]
+_SOFTWARE = ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+_PROBE_SECONDS = 15.0  # a GPU path that hangs, hangs on the first frame
 
 _INSTALL_FIXES = [
     "pip install 'world-engine-client[render]' && python -m playwright install chromium",
@@ -70,6 +78,19 @@ def available() -> bool:
     import importlib.util
 
     return all(importlib.util.find_spec(m) is not None for m in ("playwright", "websockets", "PIL"))
+
+
+def candidate_args(chrome_args=None, allow_software=False) -> list[list[str]]:
+    """The Chrome flag sets to try, in order. An explicit set (argument or
+    WE_RENDER_CHROME_ARGS) is the only one tried; software rendering comes last
+    and only when allowed."""
+    override = os.environ.get("WE_RENDER_CHROME_ARGS")
+    if chrome_args or override:
+        return [list(chrome_args or shlex.split(override))]
+    candidates = [list(c) for c in _CANDIDATES]
+    if allow_software:
+        candidates.append(_SOFTWARE + ["--no-sandbox"])
+    return candidates
 
 
 Fetch = Callable[[str], "io.BufferedIOBase"]
@@ -105,8 +126,8 @@ class LocalRenderer:
         self._cache = Path(cache_dir or tempfile.mkdtemp(prefix="we_render_"))
         self._cache.mkdir(parents=True, exist_ok=True)
         self._allow_software = allow_software
-        override = os.environ.get("WE_RENDER_CHROME_ARGS")
-        self._args = chrome_args or (shlex.split(override) if override else _CHROME_ARGS)
+        self._candidates = candidate_args(chrome_args, allow_software)
+        self.chrome_args: list[str] | None = None  # the set that worked
         self._timeout = timeout
         self.gpu = "(unknown)"
         self.software = False
@@ -203,22 +224,61 @@ class LocalRenderer:
                     self._ready.set()
 
         self._server = await websockets.serve(handler, "127.0.0.1", 0, max_size=None)
-        port = self._server.sockets[0].getsockname()[1]
+        self._ws_port = self._server.sockets[0].getsockname()[1]
         self._pw = await async_playwright().start()
-        self._browser = await self._launch()
+        # A real loopback HTTP server serves the page: Chrome's local network
+        # access checks block a page that is not itself on loopback (including
+        # one answered by request interception) from opening ws://127.0.0.1.
+        self._http = _ProxyServer(self)
+        failures = []
+        for index, args in enumerate(self._candidates):
+            last = index == len(self._candidates) - 1
+            try:
+                await self._attempt(args, accept_software=self._allow_software and last)
+                self.chrome_args = args
+                break
+            except RendererError as exc:
+                failures.append((exc, args))
+                await self._close_browser()
+        else:
+            exc, _ = failures[-1]
+            if any(e.code == "software_renderer" for e, _ in failures) and not self._allow_software:
+                raise RendererError(
+                    f"Chrome has no hardware WebGL here ({self.gpu}); software rendering "
+                    "is very slow, so it is off by default",
+                    code="software_renderer",
+                    fixes=[
+                        "check chrome://gpu, or set WE_RENDER_CHROME_ARGS for your GPU",
+                        "pass render_options={'allow_software': True} to accept slow rendering",
+                        "or pass images=False for a state-only session",
+                    ],
+                )
+            raise RendererError(
+                "no Chrome GPU configuration rendered a frame: "
+                + " | ".join(f"{' '.join(a)} -> {e}" for e, a in failures),
+                code="renderer_unavailable",
+            )
+        if self.software:
+            warnings.warn(
+                f"rendering camera images in software ({self.gpu}); expect a few frames per second",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    async def _attempt(self, args: list[str], *, accept_software: bool):
+        """Launch Chrome with ``args``, load the scene and render one frame."""
+        self._ws, self._page_error, self.software = None, None, False
+        self._ready = asyncio.Event()
+        self._browser = await self._launch(args)
         self._page = await self._browser.new_page()
         self._page.on(
             "console",
             lambda m: m.type in ("warning", "error") and self._console.append(m.text[:300]),
         )
         self._page.on("pageerror", lambda e: self._console.append(f"pageerror: {e}"))
-        # A real loopback HTTP server serves the page: Chrome's local network
-        # access checks block a page that is not itself on loopback (including
-        # one answered by request interception) from opening ws://127.0.0.1.
-        self._http = _ProxyServer(self)
         origin = f"http://127.0.0.1:{self._http.port}"
-        query = f"captureOnly=1&ws=ws://127.0.0.1:{port}/"
-        if self._allow_software:
+        query = f"captureOnly=1&ws=ws://127.0.0.1:{self._ws_port}/"
+        if accept_software:
             query += "&allowSoftware=1"
         await self._page.goto(f"{origin}/index.html?{query}", wait_until="load")
         for _ in range(int(self._timeout * 10)):
@@ -239,31 +299,39 @@ class LocalRenderer:
                 code="renderer_unavailable",
             ) from exc
         if self._page_error is not None:
+            raise RendererError(f"software renderer ({self.gpu})", code="software_renderer")
+        probe = {
+            "type": "state",
+            "bodies": [],
+            "robot": {"ee_pos": [0, 0, 0], "ee_quat": [0, 0, 0, 1], "gripper": 0.0},
+            "cameras": self._scene_init.get("cameras", []),
+        }
+        try:
+            await asyncio.wait_for(self._render(probe), _PROBE_SECONDS)
+        except TimeoutError as exc:
             raise RendererError(
-                f"Chrome has no hardware WebGL here ({self.gpu}); software rendering "
-                "is very slow, so it is off by default",
-                code="software_renderer",
-                fixes=[
-                    "check chrome://gpu, or set WE_RENDER_CHROME_ARGS for your GPU",
-                    "pass render_options={'allow_software': True} to accept slow rendering",
-                    "or pass images=False for a state-only session",
-                ],
-            )
-        if self.software:
-            warnings.warn(
-                f"rendering camera images in software ({self.gpu}); expect a few frames per second",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+                f"the first frame did not render within {_PROBE_SECONDS:.0f} s ({self.gpu})",
+                code="renderer_unavailable",
+            ) from exc
 
-    async def _launch(self):
+    async def _close_browser(self):
+        browser, self._browser = getattr(self, "_browser", None), None
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        self._ws = None
+        self._pending.clear()
+
+    async def _launch(self, args: list[str]):
         errors = []
         for channel in ("chrome", None):  # an installed Chrome, else Playwright's
             try:
                 return await self._pw.chromium.launch(
                     channel=channel,
                     headless=True,
-                    args=self._args,
+                    args=args,
                     ignore_default_args=["--disable-gpu", "--headless"],
                 )
             except Exception as exc:  # noqa: BLE001 - try the next browser

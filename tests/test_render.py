@@ -173,3 +173,14 @@ def test_downloads_are_verified_against_their_digest(tmp_path, stub):
         renderer._download("/__asset/0.ply", bad.name, bad)
     assert not bad.exists() and not bad.with_suffix(".part").exists()
     env.close()
+
+
+def test_chrome_flag_sets_are_tried_in_order(monkeypatch):
+    monkeypatch.delenv("WE_RENDER_CHROME_ARGS", raising=False)
+    sets = render_module.candidate_args()
+    assert sets and all("--headless=new" in args for args in sets)
+    assert not any("--use-angle=swiftshader" in args for args in sets)
+    assert "--use-angle=swiftshader" in render_module.candidate_args(allow_software=True)[-1]
+    assert render_module.candidate_args(["--a"]) == [["--a"]]
+    monkeypatch.setenv("WE_RENDER_CHROME_ARGS", "--b --c")
+    assert render_module.candidate_args(allow_software=True) == [["--b", "--c"]]
