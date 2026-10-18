@@ -73,8 +73,15 @@ browser tab is open, and the images never travel over the network. This needs th
 
 ```bash
 pip install 'world-engine-client[render]'
-python -m playwright install chromium     # skip if Google Chrome is installed
 ```
+
+An installed Google Chrome is used if there is one. Otherwise the first session
+downloads Playwright's Chromium (about 300 MB, once, with progress in the
+terminal). Set `WE_RENDER_AUTO_INSTALL=0` or pass
+`render_options={"auto_install": False}` to turn that off and run
+`python -m playwright install chromium` yourself. On a minimal Linux system
+Chromium may also need its system libraries:
+`python -m playwright install --with-deps chromium` (needs sudo).
 
 Scene assets are fetched once per session and cached by content hash in a
 temporary directory that `close()` deletes; pass

@@ -11,8 +11,10 @@ by content digest in a temporary directory that ``close()`` deletes, or in
 ``cache_dir`` to keep them across sessions.
 
 Needs the ``render`` extra (Playwright, websockets, Pillow) and a Chrome or
-Chromium: ``pip install 'world-engine-client[render]'`` then
-``python -m playwright install chromium`` (or use an installed Chrome).
+Chromium: ``pip install 'world-engine-client[render]'``. An installed Google
+Chrome is used first; otherwise Playwright's Chromium, which is downloaded
+automatically the first time (``WE_RENDER_AUTO_INSTALL=0`` turns that off;
+``python -m playwright install chromium`` does it by hand).
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import mimetypes
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -63,9 +66,58 @@ _SOFTWARE = ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swift
 _PROBE_SECONDS = 15.0  # a GPU path that hangs, hangs on the first frame
 
 _INSTALL_FIXES = [
-    "pip install 'world-engine-client[render]' && python -m playwright install chromium",
+    "pip install 'world-engine-client[render]' (Chromium downloads on first use)",
     "or pass images=False for a state-only session",
 ]
+_SYSTEM_DEPS_FIX = (
+    "on Linux, install Chromium's system libraries: "
+    "python -m playwright install --with-deps chromium (needs sudo)"
+)
+_install_lock = threading.Lock()
+_installed = False
+
+
+def _browser_missing(message: str) -> bool:
+    return "Executable doesn't exist" in message or "playwright install" in message
+
+
+def _system_deps_missing(message: str) -> bool:
+    text = message.lower()
+    return "missing dependencies" in text or "shared libraries" in text
+
+
+def _auto_install_enabled(option: bool | None) -> bool:
+    """Download Chromium when no browser is found, unless turned off by the
+    option or WE_RENDER_AUTO_INSTALL=0."""
+    if option is not None:
+        return option
+    return os.environ.get("WE_RENDER_AUTO_INSTALL", "1") != "0"
+
+
+def install_chromium() -> None:
+    """Download Playwright's Chromium, at most once per process.
+
+    Used when neither an installed Chrome nor Playwright's Chromium is
+    available, so ``pip install 'world-engine-client[render]'`` is the only
+    step most users need. Progress goes to the terminal."""
+    global _installed
+    with _install_lock:
+        if _installed:
+            return
+        print(
+            "world-engine-client: downloading Chromium for camera rendering "
+            "(a download of about 300 MB, only once) ...",
+            file=sys.stderr,
+            flush=True,
+        )
+        done = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
+        if done.returncode != 0:
+            raise RendererError(
+                "downloading Chromium failed",
+                code="renderer_unavailable",
+                fixes=["python -m playwright install chromium", _SYSTEM_DEPS_FIX],
+            )
+        _installed = True
 
 
 class RendererError(WorldEngineClientError):
@@ -111,6 +163,7 @@ class LocalRenderer:
         cache_dir: str | os.PathLike | None = None,
         allow_software: bool = False,
         chrome_args: list[str] | None = None,
+        auto_install: bool | None = None,
         timeout: float = 300.0,
     ):
         if not available():
@@ -127,6 +180,7 @@ class LocalRenderer:
         self._cache.mkdir(parents=True, exist_ok=True)
         self._allow_software = allow_software
         self._candidates = candidate_args(chrome_args, allow_software)
+        self._auto_install = _auto_install_enabled(auto_install)
         self.chrome_args: list[str] | None = None  # the set that worked
         self._timeout = timeout
         self.gpu = "(unknown)"
@@ -328,18 +382,29 @@ class LocalRenderer:
         errors = []
         for channel in ("chrome", None):  # an installed Chrome, else Playwright's
             try:
-                return await self._pw.chromium.launch(
-                    channel=channel,
-                    headless=True,
-                    args=args,
-                    ignore_default_args=["--disable-gpu", "--headless"],
-                )
+                return await self._open(channel, args)
             except Exception as exc:  # noqa: BLE001 - try the next browser
-                errors.append(str(exc).splitlines()[0])
+                errors.append(str(exc))
+        if self._auto_install and _browser_missing(errors[-1]):
+            await asyncio.to_thread(install_chromium)
+            try:
+                return await self._open(None, args)
+            except Exception as exc:  # noqa: BLE001 - reported below
+                errors.append(str(exc))
+        fixes = [_SYSTEM_DEPS_FIX] if _system_deps_missing(errors[-1]) else list(_INSTALL_FIXES)
         raise RendererError(
-            "no Chrome or Chromium to render with: " + " | ".join(errors),
+            "no Chrome or Chromium to render with: "
+            + " | ".join(e.splitlines()[0] for e in errors),
             code="renderer_unavailable",
-            fixes=_INSTALL_FIXES,
+            fixes=fixes,
+        )
+
+    async def _open(self, channel: str | None, args: list[str]):
+        return await self._pw.chromium.launch(
+            channel=channel,
+            headless=True,
+            args=args,
+            ignore_default_args=["--disable-gpu", "--headless"],
         )
 
     async def _render(self, state):

@@ -56,4 +56,4 @@ __all__ = [
     "axisangle_to_matrix",
     "matrix_to_axisangle",
 ]
-__version__ = "0.4.1"
+__version__ = "0.4.2"

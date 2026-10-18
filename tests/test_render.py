@@ -184,3 +184,103 @@ def test_chrome_flag_sets_are_tried_in_order(monkeypatch):
     assert render_module.candidate_args(["--a"]) == [["--a"]]
     monkeypatch.setenv("WE_RENDER_CHROME_ARGS", "--b --c")
     assert render_module.candidate_args(allow_software=True) == [["--b", "--c"]]
+
+
+class FakeChromium:
+    """Playwright's chromium.launch: Chrome is absent; Chromium appears once installed."""
+
+    def __init__(self, installed=False, broken=None):
+        self.installed, self.broken, self.calls = installed, broken, []
+
+    async def launch(self, channel=None, **_):
+        self.calls.append(channel)
+        if channel == "chrome":
+            raise RuntimeError('Chromium distribution "chrome" is not found at /opt/google/chrome')
+        if self.broken:
+            raise RuntimeError(self.broken)
+        if not self.installed:
+            raise RuntimeError(
+                "Executable doesn't exist at /root/.cache/ms-playwright/chromium/chrome\n"
+                "Looks like Playwright was just installed. Run: playwright install"
+            )
+        return "browser"
+
+
+def _renderer_with(chromium, auto_install=True):
+    from types import SimpleNamespace
+
+    renderer = object.__new__(render_module.LocalRenderer)  # no browser started
+    renderer._pw = SimpleNamespace(chromium=chromium)
+    renderer._auto_install = auto_install
+    return renderer
+
+
+@pytest.fixture
+def downloads(monkeypatch):
+    """subprocess.run for `playwright install chromium`, recorded and successful."""
+    import asyncio  # noqa: F401 - used by the tests below
+
+    calls = []
+    monkeypatch.setattr(render_module, "_installed", False)
+
+    def run(cmd, **_):
+        calls.append(cmd)
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(render_module.subprocess, "run", run)
+    return calls
+
+
+def test_chromium_is_downloaded_once_when_no_browser_is_found(downloads):
+    import asyncio
+    import sys
+
+    chromium = FakeChromium()
+    original = render_module.install_chromium
+
+    def install():
+        original()
+        chromium.installed = True
+
+    renderer = _renderer_with(chromium)
+    render_module.install_chromium, saved = install, render_module.install_chromium
+    try:
+        assert asyncio.run(renderer._launch(["--headless=new"])) == "browser"
+        assert asyncio.run(renderer._launch(["--headless=new"])) == "browser"
+    finally:
+        render_module.install_chromium = saved
+    assert downloads == [[sys.executable, "-m", "playwright", "install", "chromium"]]
+    assert chromium.calls[:3] == ["chrome", None, None]
+
+
+def test_auto_install_can_be_turned_off(downloads, monkeypatch):
+    import asyncio
+
+    with pytest.raises(wec.RendererError, match="playwright install chromium"):
+        asyncio.run(_renderer_with(FakeChromium(), auto_install=False)._launch([]))
+    assert downloads == []
+    monkeypatch.delenv("WE_RENDER_AUTO_INSTALL", raising=False)
+    assert render_module._auto_install_enabled(None) is True
+    monkeypatch.setenv("WE_RENDER_AUTO_INSTALL", "0")
+    assert render_module._auto_install_enabled(None) is False
+    assert render_module._auto_install_enabled(True) is True
+
+
+def test_missing_system_libraries_point_to_with_deps(downloads):
+    import asyncio
+
+    broken = "Host system is missing dependencies to run browsers. libnss3.so"
+    with pytest.raises(wec.RendererError, match="--with-deps"):
+        asyncio.run(_renderer_with(FakeChromium(installed=True, broken=broken))._launch([]))
+    assert downloads == [], "a present but unusable Chromium is not downloaded again"
+
+
+def test_a_failed_download_says_how_to_do_it_by_hand(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(render_module, "_installed", False)
+    monkeypatch.setattr(
+        render_module.subprocess, "run", lambda cmd, **_: type("D", (), {"returncode": 1})()
+    )
+    with pytest.raises(wec.RendererError, match="downloading Chromium failed"):
+        asyncio.run(_renderer_with(FakeChromium())._launch([]))
