@@ -391,7 +391,16 @@ class LocalRenderer:
                 return await self._open(None, args)
             except Exception as exc:  # noqa: BLE001 - reported below
                 errors.append(str(exc))
-        fixes = [_SYSTEM_DEPS_FIX] if _system_deps_missing(errors[-1]) else list(_INSTALL_FIXES)
+        if _system_deps_missing(errors[-1]):
+            fixes = [_SYSTEM_DEPS_FIX]
+        elif _browser_missing(errors[-1]):
+            # Only reached with the automatic download turned off.
+            fixes = [
+                "python -m playwright install chromium (automatic download is off)",
+                "or pass images=False for a state-only session",
+            ]
+        else:
+            fixes = list(_INSTALL_FIXES)
         raise RendererError(
             "no Chrome or Chromium to render with: "
             + " | ".join(e.splitlines()[0] for e in errors),
