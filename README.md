@@ -10,9 +10,10 @@ server's `viewer.html` sees the episode live.
 pip install world-engine-client
 ```
 
-Base dependencies: numpy only. Install `world-engine-client[img,gym]` for
-optional Pillow decoding and the Gymnasium adapter. The import name is `world_engine_client` (the
-`world_engine` module name belongs to the simulation server package).
+Needs Python 3.11 or newer. Base dependencies: numpy only. Install
+`world-engine-client[img,gym]` for optional Pillow decoding and the Gymnasium adapter. The import
+name is `world_engine_client` (the `world_engine` module name belongs to the simulation server
+package).
 
 ## Usage
 

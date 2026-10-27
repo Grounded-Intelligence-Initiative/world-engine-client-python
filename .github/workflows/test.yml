@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ["3.10", "3.11", "3.12"]
+        python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,3 +19,22 @@ jobs:
       - run: pip install -e '.[img,gym]' pytest ruff
       - run: ruff check .
       - run: python -m pytest
+
+  # The render extra on every supported Python, and a real headless Chrome.
+  # The runners have no GPU, so the Chrome test also covers software rendering.
+  render:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[render,gym]' pytest
+      - run: python -c "from world_engine_client import render; assert render.available()"
+      - run: python -m playwright install --with-deps --only-shell chromium
+      - run: python -m pytest
+        env:
+          WE_TEST_REQUIRE_CHROME: "1"

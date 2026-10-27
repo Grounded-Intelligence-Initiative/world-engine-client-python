@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "world-engine-client"
-version = "0.4.2"
+version = "0.5.0"
 description = "Remote Gym-style Python client for a World Engine simulation server: connect(token) -> reset/step over HTTP."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Xiatao Sun", email = "sunxiatao@gmail.com" }]
 keywords = ["robotics", "simulation", "gymnasium", "gaussian-splatting", "real2sim"]
@@ -16,7 +16,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -28,8 +27,8 @@ dependencies = [
 [project.optional-dependencies]
 img = ["Pillow>=10"]
 gym = ["gymnasium>=1.0"]
-# Camera images, rendered on this machine; also run
-# `python -m playwright install chromium` unless Chrome is installed.
+# Camera images, rendered on this machine in headless Chrome. Without an
+# installed Chrome, Playwright's Chromium downloads on first use.
 render = ["Pillow>=10", "playwright>=1.40", "websockets>=12"]
 
 [dependency-groups]
