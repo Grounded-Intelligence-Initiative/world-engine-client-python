@@ -15,6 +15,10 @@ Chromium: ``pip install 'world-engine-client[render]'``. An installed Google
 Chrome is used first; otherwise Playwright's Chromium, which is downloaded
 automatically the first time (``WE_RENDER_AUTO_INSTALL=0`` turns that off;
 ``python -m playwright install chromium`` does it by hand).
+
+Without a hardware GPU the images are rendered in software (SwiftShader), with
+a RuntimeWarning; ``allow_software=False`` refuses that instead. A hardware
+adapter that renders slowly gets one RuntimeWarning too (see ``_SLOW_STEPS``).
 """
 
 from __future__ import annotations
@@ -25,12 +29,15 @@ import io
 import json
 import mimetypes
 import os
+import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -63,7 +70,26 @@ elif sys.platform.startswith("linux"):
 else:
     _CANDIDATES = [["--headless=new", "--ignore-gpu-blocklist"]]
 _SOFTWARE = ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-_PROBE_SECONDS = 15.0  # a GPU path that hangs, hangs on the first frame
+# A GPU path that hangs, hangs on the first frame. Only hardware rendering is
+# held to this; software rendering is slow, not stuck, and gets the full timeout.
+_PROBE_SECONDS = 15.0
+_PAGE_ERROR_GRACE = 5.0  # seconds a page that threw before connecting gets to connect
+# Software adapters by their WebGL renderer name: SwiftShader, Mesa's llvmpipe
+# and lavapipe, Windows' WARP ("Microsoft Basic Render Driver").
+_SOFTWARE_GPU = re.compile(
+    r"swiftshader|llvmpipe|lavapipe|softpipe|basic render driver|software", re.IGNORECASE
+)
+
+# Speed check of hardware rendering (software rendering has its own warning).
+# This browser path is slow even on a fast GPU: an RTX 4090 renders three
+# 256x256 cameras of 0.4M-1.6M splat scenes at 6.8-17.2 steps/s (render only,
+# 2026-10-26). Below half of the slowest of those, rendering limits the session
+# and one RuntimeWarning per process says so. Timed after the first frames,
+# which carry one-time costs; the median keeps a single slow frame from counting.
+_SLOW_STEPS = 3.0
+_SPEED_SKIP = 2  # renders after connect that are not timed
+_SPEED_SAMPLES = 10  # renders timed after those
+_slow_warned = False
 
 _INSTALL_FIXES = [
     "pip install 'world-engine-client[render]' (Chromium downloads on first use)",
@@ -132,10 +158,10 @@ def available() -> bool:
     return all(importlib.util.find_spec(m) is not None for m in ("playwright", "websockets", "PIL"))
 
 
-def candidate_args(chrome_args=None, allow_software=False) -> list[list[str]]:
+def candidate_args(chrome_args=None, allow_software=True) -> list[list[str]]:
     """The Chrome flag sets to try, in order. An explicit set (argument or
     WE_RENDER_CHROME_ARGS) is the only one tried; software rendering comes last
-    and only when allowed."""
+    unless ``allow_software`` is False."""
     override = os.environ.get("WE_RENDER_CHROME_ARGS")
     if chrome_args or override:
         return [list(chrome_args or shlex.split(override))]
@@ -152,7 +178,10 @@ class LocalRenderer:
     """Headless Chrome running the capture page; ``render(state)`` -> images.
 
     ``fetch(path)`` opens ``<server>/render<path>`` with the session's
-    credentials and returns a readable response."""
+    credentials and returns a readable response. Without hardware WebGL the
+    page renders in software after a RuntimeWarning; ``allow_software=False``
+    makes that an error. ``timeout`` bounds loading the page, loading the scene
+    and each frame."""
 
     def __init__(
         self,
@@ -161,7 +190,7 @@ class LocalRenderer:
         digests: dict[str, str],
         *,
         cache_dir: str | os.PathLike | None = None,
-        allow_software: bool = False,
+        allow_software: bool = True,
         chrome_args: list[str] | None = None,
         auto_install: bool | None = None,
         timeout: float = 300.0,
@@ -193,12 +222,15 @@ class LocalRenderer:
         self._page_error: dict | None = None
         self._console: list[str] = []
         self._http = None
+        self._render_seconds: list[float] = []
         self._download_lock = threading.Lock()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
         try:
-            self._call(self._start(), timeout + 30)
+            # Loading the page, loading the scene and a software first frame may
+            # each take up to ``timeout``; this limit only catches a stuck start.
+            self._call(self._start(), 3 * timeout + 60 * len(self._candidates))
         except BaseException:
             self.close()
             raise
@@ -209,6 +241,7 @@ class LocalRenderer:
         return ``{camera name: (H, W, 3) uint8}``."""
         if self._ws is None:
             raise RendererError("renderer is closed", code="renderer_unavailable")
+        started = time.perf_counter()
         header, payload = self._call(self._render(dict(state)), self._timeout)
         from PIL import Image
 
@@ -218,6 +251,7 @@ class LocalRenderer:
             with Image.open(io.BytesIO(chunk)) as img:
                 images[spec["name"]] = np.asarray(img.convert("RGB"), dtype=np.uint8).copy()
         self.last_timings = header.get("timings", {})
+        self._check_speed(time.perf_counter() - started)
         return images
 
     def close(self) -> None:
@@ -228,6 +262,8 @@ class LocalRenderer:
                 pass
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._thread.join(timeout=10)
+        if not self._thread.is_alive() and not self._loop.is_closed():
+            self._loop.close()
         if self._own_cache:
             shutil.rmtree(self._cache, ignore_errors=True)
 
@@ -258,24 +294,7 @@ class LocalRenderer:
         async def handler(ws):
             self._ws = ws
             async for raw in ws:
-                if isinstance(raw, (bytes, bytearray)):
-                    buf = bytes(raw)
-                    size = int.from_bytes(buf[:4], "little")
-                    header = json.loads(buf[4 : 4 + size].decode("utf-8"))
-                    fut = self._pending.pop(header.get("frame_id"), None)
-                    if fut is not None and not fut.done():
-                        fut.set_result((header, buf[4 + size :]))
-                    continue
-                msg = json.loads(raw)
-                if msg.get("type") == "ready":
-                    self.gpu = msg.get("gpu", self.gpu)
-                    self.software = bool(msg.get("software"))
-                    self.lighting = msg.get("lighting")
-                    self._ready.set()
-                elif msg.get("type") == "error":
-                    self._page_error = msg
-                    self.gpu = msg.get("gpu", self.gpu)
-                    self._ready.set()
+                self._receive(raw)
 
         self._server = await websockets.serve(handler, "127.0.0.1", 0, max_size=None)
         self._ws_port = self._server.sockets[0].getsockname()[1]
@@ -284,40 +303,60 @@ class LocalRenderer:
         # access checks block a page that is not itself on loopback (including
         # one answered by request interception) from opening ws://127.0.0.1.
         self._http = _ProxyServer(self)
+        await self._try_candidates()
+
+    def _receive(self, raw) -> None:
+        """One message from the capture page: a frame, or ready/error."""
+        if isinstance(raw, (bytes, bytearray)):
+            buf = bytes(raw)
+            size = int.from_bytes(buf[:4], "little")
+            header = json.loads(buf[4 : 4 + size].decode("utf-8"))
+            fut = self._pending.pop(header.get("frame_id"), None)
+            if fut is not None and not fut.done():
+                fut.set_result((header, buf[4 + size :]))
+            return
+        msg = json.loads(raw)
+        if msg.get("type") == "ready":
+            self.gpu = msg.get("gpu", self.gpu)
+            # The page knows SwiftShader and llvmpipe; Windows' WARP is software too.
+            found = _SOFTWARE_GPU.search(str(self.gpu))
+            self.software = bool(msg.get("software")) or found is not None
+            self.lighting = msg.get("lighting")
+            self._ready.set()
+        elif msg.get("type") == "error":
+            self._page_error = msg
+            self.gpu = msg.get("gpu", self.gpu)
+            self._ready.set()
+
+    async def _try_candidates(self):
+        """Try the Chrome flag sets in order until one renders a frame."""
         failures = []
         for index, args in enumerate(self._candidates):
             last = index == len(self._candidates) - 1
             try:
                 await self._attempt(args, accept_software=self._allow_software and last)
                 self.chrome_args = args
-                break
+                return
             except RendererError as exc:
                 failures.append((exc, args))
                 await self._close_browser()
-        else:
-            exc, _ = failures[-1]
-            if any(e.code == "software_renderer" for e, _ in failures) and not self._allow_software:
-                raise RendererError(
-                    f"Chrome has no hardware WebGL here ({self.gpu}); software rendering "
-                    "is very slow, so it is off by default",
-                    code="software_renderer",
-                    fixes=[
-                        "check chrome://gpu, or set WE_RENDER_CHROME_ARGS for your GPU",
-                        "pass render_options={'allow_software': True} to accept slow rendering",
-                        "or pass images=False for a state-only session",
-                    ],
-                )
+        no_hardware = any(e.code == "software_renderer" for e, _ in failures)
+        if no_hardware and not self._allow_software:
             raise RendererError(
-                "no Chrome GPU configuration rendered a frame: "
-                + " | ".join(f"{' '.join(a)} -> {e}" for e, a in failures),
-                code="renderer_unavailable",
+                f"Chrome has no hardware WebGL here ({self.gpu}), and allow_software=False "
+                "turns software rendering off",
+                code="software_renderer",
+                fixes=[
+                    "check chrome://gpu, or set WE_RENDER_CHROME_ARGS for your GPU",
+                    "leave allow_software at its default (True) to accept slow software rendering",
+                    "or pass images=False for a state-only session",
+                ],
             )
-        if self.software:
-            warnings.warn(
-                f"rendering camera images in software ({self.gpu}); expect a few frames per second",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        raise RendererError(
+            "no Chrome configuration rendered a frame: "
+            + " | ".join(f"{' '.join(a)} -> {e}" for e, a in failures),
+            code="renderer_unavailable",
+        )
 
     async def _attempt(self, args: list[str], *, accept_software: bool):
         """Launch Chrome with ``args``, load the scene and render one frame."""
@@ -329,14 +368,24 @@ class LocalRenderer:
             "console",
             lambda m: m.type in ("warning", "error") and self._console.append(m.text[:300]),
         )
-        self._page.on("pageerror", lambda e: self._console.append(f"pageerror: {e}"))
+        failed_at = []  # when the page first threw an uncaught error
+
+        def page_error(error):
+            self._console.append(f"pageerror: {error}")
+            failed_at.append(time.monotonic())
+
+        self._page.on("pageerror", page_error)
         origin = f"http://127.0.0.1:{self._http.port}"
         query = f"captureOnly=1&ws=ws://127.0.0.1:{self._ws_port}/"
         if accept_software:
             query += "&allowSoftware=1"
         await self._page.goto(f"{origin}/index.html?{query}", wait_until="load")
-        for _ in range(int(self._timeout * 10)):
-            if self._ws is not None:
+        deadline = time.monotonic() + self._timeout
+        while self._ws is None and time.monotonic() < deadline:
+            # The page opens its socket at the end of its start-up script. An
+            # uncaught error with no socket soon after (no WebGL with these
+            # flags, for one) means it never will.
+            if failed_at and time.monotonic() - failed_at[0] > _PAGE_ERROR_GRACE:
                 break
             await asyncio.sleep(0.1)
         if self._ws is None:
@@ -352,8 +401,20 @@ class LocalRenderer:
                 "scene loading timed out: " + " | ".join(self._console[-5:]),
                 code="renderer_unavailable",
             ) from exc
-        if self._page_error is not None:
+        if self._page_error is not None or (self.software and not self._allow_software):
             raise RendererError(f"software renderer ({self.gpu})", code="software_renderer")
+        limit = _PROBE_SECONDS
+        if self.software:
+            # Software rendering is slow, not stuck: warn now, since the first
+            # frame of a real scene can take minutes, and give it the timeout.
+            warnings.warn(
+                f"no hardware GPU for camera images, rendering in software ({self.gpu}). "
+                "Real scenes take seconds per step; pass images=False for a state-only "
+                "session, or check chrome://gpu if this machine has a GPU",
+                RuntimeWarning,
+                stacklevel=1,
+            )
+            limit = self._timeout
         probe = {
             "type": "state",
             "bodies": [],
@@ -361,12 +422,34 @@ class LocalRenderer:
             "cameras": self._scene_init.get("cameras", []),
         }
         try:
-            await asyncio.wait_for(self._render(probe), _PROBE_SECONDS)
+            await asyncio.wait_for(self._render(probe), limit)
         except TimeoutError as exc:
             raise RendererError(
-                f"the first frame did not render within {_PROBE_SECONDS:.0f} s ({self.gpu})",
+                f"the first frame did not render within {limit:.0f} s ({self.gpu})",
                 code="renderer_unavailable",
             ) from exc
+
+    def _check_speed(self, seconds: float) -> None:
+        """Time the first renders; warn once per process when a hardware adapter
+        renders below _SLOW_STEPS. Software rendering has its own warning."""
+        global _slow_warned
+        needed = _SPEED_SKIP + _SPEED_SAMPLES
+        if self.software or _slow_warned or len(self._render_seconds) >= needed:
+            return
+        self._render_seconds.append(seconds)
+        if len(self._render_seconds) < needed:
+            return
+        rate = 1.0 / statistics.median(self._render_seconds[_SPEED_SKIP:])
+        if rate < _SLOW_STEPS:
+            _slow_warned = True
+            warnings.warn(
+                f"camera rendering is slow here: {rate:.1f} steps/s over {_SPEED_SAMPLES} steps "
+                f"on {self.gpu} (a hardware adapter, not software), below {_SLOW_STEPS:g} "
+                "steps/s. Pass images=False for a state-only session, or cameras=[...] to "
+                "render fewer cameras",
+                RuntimeWarning,
+                stacklevel=1,
+            )
 
     async def _close_browser(self):
         browser, self._browser = getattr(self, "_browser", None), None

@@ -60,10 +60,12 @@ def connect(
 
     Camera images (``images=True`` or ``cameras=[...]``) are rendered on this
     machine in headless Chrome; the server only simulates. That needs the
-    ``render`` extra. ``render`` accepts ``"auto"`` or ``"local"`` (the same
-    thing; kept for callers that pass it). ``render_options`` go to
+    ``render`` extra. Without a hardware GPU they are rendered in software,
+    with a RuntimeWarning. ``render`` accepts ``"auto"`` or ``"local"`` (the
+    same thing; kept for callers that pass it). ``render_options`` go to
     :class:`world_engine_client.render.LocalRenderer` (``cache_dir``,
-    ``allow_software``, ``chrome_args``)."""
+    ``allow_software`` (default True; False refuses software rendering),
+    ``chrome_args``, ``auto_install``, ``timeout``)."""
     if render not in ("auto", "local"):
         raise ValueError("render must be 'auto' or 'local': servers no longer render camera images")
     env = RemoteEnv(url.rstrip("/"), token, timeout=timeout)

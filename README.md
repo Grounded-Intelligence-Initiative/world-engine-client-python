@@ -85,12 +85,27 @@ Chromium may also need its system libraries:
 
 Scene assets are fetched once per session and cached by content hash in a
 temporary directory that `close()` deletes; pass
-`render_options={"cache_dir": "..."}` to keep them across sessions. Chrome must
-get hardware WebGL (check `chrome://gpu`). Without it the renderer refuses to
-start, because software rendering manages only a few frames per second;
-`render_options={"allow_software": True}` accepts that, and the
+`render_options={"cache_dir": "..."}` to keep them across sessions. The
 `WE_RENDER_CHROME_ARGS` environment variable overrides Chrome's flags.
 `env.last_timings` splits each step into server, transport and render time.
+
+Without a hardware GPU, the images are rendered in software (SwiftShader) and
+a `RuntimeWarning` says so before the first frame. Expect seconds per step: with
+four CPU cores, a 400k-splat scene took 6–7 s per step and a 1.6M-splat scene
+25–28 s. `render_options={"allow_software": False}` turns software rendering
+off, and then a machine without hardware WebGL raises `RendererError`. If this
+machine has a GPU and still renders in software, check `chrome://gpu`.
+
+On a hardware adapter, the client times the rendering of the first steps
+(10 steps, after 2 untimed ones). If the median is below 3 steps per second, it
+issues one `RuntimeWarning` per process with the adapter's name and the measured
+rate, and suggests `images=False` or fewer cameras. The threshold comes from
+measurement: on an RTX 4090 with three 256×256 cameras, this renderer drew
+0.4M–1.6M splat scenes at 6.8–17.2 steps per second (render only, idle machine),
+and 3 is about half of the slowest of these. Network latency does not count,
+because only the rendering is timed. Real time (29.4 steps per second, one step
+per 0.034 s) is not the threshold: this renderer stays below it even on an
+RTX 4090.
 
 Heartbeats run every 30 seconds with a 90-second controller lease. Expiry freezes
 the simulation until explicit takeover. A lost action response is never retried:
@@ -175,3 +190,6 @@ pip install -e '.[img,gym,render]' pytest && python -m pytest
 never-retry / recovery rules, heartbeats and Gymnasium spaces. The wire-contract
 tests (real client against a real server) live in the server repo:
 `tests/test_remote_*.py` and `tests/test_teleop_channel.py`.
+`tests/test_render_chrome.py` renders a small page in a real headless Chrome on
+SwiftShader. It is skipped without the `render` extra or a browser;
+`WE_TEST_REQUIRE_CHROME=1` makes it fail instead.

@@ -1,8 +1,14 @@
 """Client rendering without a browser: the extra requirement, the render_state
 hand-off, credentials on asset requests and the digest cache."""
 
+import asyncio
 import copy
 import hashlib
+import json
+import re
+import sys
+import warnings
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -179,11 +185,20 @@ def test_chrome_flag_sets_are_tried_in_order(monkeypatch):
     monkeypatch.delenv("WE_RENDER_CHROME_ARGS", raising=False)
     sets = render_module.candidate_args()
     assert sets and all("--headless=new" in args for args in sets)
-    assert not any("--use-angle=swiftshader" in args for args in sets)
-    assert "--use-angle=swiftshader" in render_module.candidate_args(allow_software=True)[-1]
+    assert "--use-angle=swiftshader" in sets[-1], "software rendering is the last resort"
+    assert not any("--use-angle=swiftshader" in args for args in sets[:-1])
+    hardware = render_module.candidate_args(allow_software=False)
+    assert hardware == sets[:-1]
     assert render_module.candidate_args(["--a"]) == [["--a"]]
     monkeypatch.setenv("WE_RENDER_CHROME_ARGS", "--b --c")
-    assert render_module.candidate_args(allow_software=True) == [["--b", "--c"]]
+    assert render_module.candidate_args() == [["--b", "--c"]]
+
+
+def test_software_rendering_is_allowed_by_default():
+    import inspect
+
+    default = inspect.signature(render_module.LocalRenderer).parameters["allow_software"].default
+    assert default is True
 
 
 class FakeChromium:
@@ -284,3 +299,290 @@ def test_a_failed_download_says_how_to_do_it_by_hand(monkeypatch):
     )
     with pytest.raises(wec.RendererError, match="downloading Chromium failed"):
         asyncio.run(_renderer_with(FakeChromium())._launch([]))
+
+
+# ----- Chrome flag sets, software rendering and speed, without a browser ----- #
+SWIFTSHADER_GPU = (
+    "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)"
+)
+RTX = "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4090/PCIe/SSE2, OpenGL ES 3.2)"
+IGPU = "ANGLE (Intel, Mesa Intel(R) UHD Graphics (TGL GT1), OpenGL ES 3.2)"
+WARP = "ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11 vs_5_0 ps_5_0, D3D11)"
+SCENE = {"type": "scene_init", "cameras": []}
+
+
+class PageSim:
+    """Chrome and the capture page, simulated: the real LocalRenderer start
+    runs against it. ``gpu`` is the hardware adapter (None: no GPU, so the
+    hardware flag sets fall back to SwiftShader, as Chrome does under
+    Playwright; with ``webgl`` False they get no WebGL at all). Pages answer
+    like frontend/src/main.ts in the engine."""
+
+    def __init__(self):
+        self.gpu = None
+        self.webgl = True
+        self.first_frame = 0.0  # seconds a page takes for its first frame
+        self.handler = None
+        self.launched = []  # flag sets, in launch order
+        self.frames = []  # (flag set, frame_id, warnings issued before the frame)
+        self.log = []  # the test's recorded warnings
+
+    async def serve(self, handler, host, port, **_):
+        self.handler = handler
+        return SimpleNamespace(
+            sockets=[SimpleNamespace(getsockname=lambda: ("127.0.0.1", 9))],
+            close=lambda: None,
+            wait_closed=_done,
+        )
+
+    def playwright(self):
+        async def start():
+            return SimpleNamespace(chromium=SimpleNamespace(launch=self.launch), stop=_done)
+
+        return SimpleNamespace(start=start)
+
+    async def launch(self, channel=None, args=(), **_):
+        self.launched.append(list(args))
+        return FakeBrowser(self, list(args))
+
+
+async def _done():
+    return None
+
+
+class FakeBrowser:
+    def __init__(self, sim, args):
+        self.sim, self.args, self.sockets = sim, args, []
+        software_flags = "--use-angle=swiftshader" in args
+        self.gpu = sim.gpu if sim.gpu and not software_flags else SWIFTSHADER_GPU
+
+    async def new_page(self):
+        return FakePage(self)
+
+    async def close(self):
+        for sock in self.sockets:
+            sock.inbox.put_nowait(None)
+
+
+class FakePage:
+    def __init__(self, browser):
+        self.browser, self.handlers = browser, {}
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    async def goto(self, url, **_):
+        browser = self.browser
+        if not browser.sim.webgl and "--use-angle=swiftshader" not in browser.args:
+            # The page script throws before it opens its socket.
+            self.handlers["pageerror"](RuntimeError("Error creating WebGL context."))
+            return
+        sock = FakeSocket(self.browser, allowed="allowSoftware=1" in url)
+        self.browser.sockets.append(sock)
+        sock.task = asyncio.get_running_loop().create_task(self.browser.sim.handler(sock))
+
+
+class FakeSocket:
+    """The page's end of the socket."""
+
+    def __init__(self, browser, allowed):
+        self.browser, self.inbox, self.rendered = browser, asyncio.Queue(), 0
+        self.software = bool(re.search("SwiftShader|llvmpipe|software", browser.gpu, re.I))
+        self.refused = self.software and not allowed
+        if self.refused:
+            self._reply({"type": "error", "code": "software_renderer", "gpu": browser.gpu})
+
+    def _reply(self, msg):
+        self.inbox.put_nowait(msg if isinstance(msg, bytes) else json.dumps(msg))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = await self.inbox.get()
+        if item is None:
+            raise StopAsyncIteration
+        return item
+
+    async def send(self, text):
+        msg = json.loads(text)
+        if self.refused:
+            return
+        sim = self.browser.sim
+        if msg["type"] == "scene_init":
+            ready = {"type": "ready", "gpu": self.browser.gpu, "software": self.software}
+            self._reply({**ready, "lighting": "studio"})
+        elif msg["type"] == "state":
+            sim.frames.append((self.browser.args, msg["frame_id"], len(sim.log)))
+            delay = sim.first_frame if self.rendered == 0 else 0.0
+            self.rendered += 1
+            header = json.dumps({"frame_id": msg["frame_id"], "images": []}).encode()
+            frame = len(header).to_bytes(4, "little") + header
+            asyncio.get_running_loop().call_later(delay, self._reply, frame)
+
+
+@pytest.fixture
+def chrome_sim(monkeypatch):
+    """LocalRenderer with Playwright and websockets replaced by PageSim."""
+    sim = PageSim()
+    monkeypatch.setattr(render_module, "available", lambda: True)
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(serve=sim.serve))
+    monkeypatch.setitem(sys.modules, "playwright", ModuleType("playwright"))
+    async_api = SimpleNamespace(async_playwright=sim.playwright)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", async_api)
+    monkeypatch.delenv("WE_RENDER_CHROME_ARGS", raising=False)
+    monkeypatch.setattr(render_module, "_slow_warned", False, raising=False)
+    return sim
+
+
+def start(sim, **options):
+    """A LocalRenderer started against ``sim``; its RuntimeWarnings land in ``sim.log``."""
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        warnings.simplefilter("ignore", ResourceWarning)  # objects of earlier tests
+        sim.log = log
+        try:
+            return render_module.LocalRenderer(lambda path: None, SCENE, {}, **options)
+        finally:
+            sim.log = [w for w in log if issubclass(w.category, RuntimeWarning)]
+
+
+def software_warnings(log):
+    return [w for w in log if "in software" in str(w.message)]
+
+
+def test_without_a_gpu_images_are_rendered_in_software_by_default(chrome_sim):
+    renderer = start(chrome_sim, timeout=10)
+    try:
+        assert renderer.software and renderer.gpu == SWIFTSHADER_GPU
+        assert "--use-angle=swiftshader" in renderer.chrome_args
+        (warned,) = software_warnings(chrome_sim.log)
+        assert warned.category is RuntimeWarning and "images=False" in str(warned.message)
+    finally:
+        renderer.close()
+
+
+def test_allow_software_false_still_refuses_software_rendering(chrome_sim):
+    with pytest.raises(wec.RendererError) as caught:
+        start(chrome_sim, allow_software=False, timeout=10)
+    assert caught.value.code == "software_renderer"
+    assert "images=False" in str(caught.value)
+    assert not any("--use-angle=swiftshader" in args for args in chrome_sim.launched)
+
+
+def test_the_software_first_frame_is_not_held_to_the_hardware_probe(chrome_sim, monkeypatch):
+    """The first frame of a real scene takes SwiftShader far longer than the
+    probe that catches a hung GPU path; it gets the renderer timeout instead."""
+    monkeypatch.setattr(render_module, "_PROBE_SECONDS", 0.05)
+    chrome_sim.first_frame = 0.5
+    renderer = start(chrome_sim, allow_software=True, timeout=10)
+    try:
+        assert renderer.software and "--use-angle=swiftshader" in renderer.chrome_args
+    finally:
+        renderer.close()
+
+
+def test_the_software_warning_comes_before_the_first_frame(chrome_sim):
+    renderer = start(chrome_sim, allow_software=True, timeout=10)
+    renderer.close()
+    (args, frame_id, warned_before) = chrome_sim.frames[0]
+    assert "--use-angle=swiftshader" in args and frame_id == 1
+    assert warned_before == 1, "the software warning is issued before the first frame starts"
+
+
+def test_a_hardware_first_frame_is_still_held_to_the_probe(chrome_sim, monkeypatch):
+    """A GPU path that hangs on its first frame is abandoned after the probe."""
+    monkeypatch.setattr(render_module, "_PROBE_SECONDS", 0.05)
+    chrome_sim.gpu, chrome_sim.first_frame = RTX, 0.5
+    with pytest.raises(wec.RendererError, match="did not render within 0 s"):
+        start(chrome_sim, allow_software=False, timeout=10)
+    assert len(chrome_sim.launched) == len(render_module.candidate_args(allow_software=False))
+
+
+def test_warp_counts_as_software(chrome_sim):
+    """The page does not flag Windows' WARP adapter; the client does."""
+    chrome_sim.gpu = WARP
+    renderer = start(chrome_sim, timeout=10)
+    try:
+        assert renderer.software and len(software_warnings(chrome_sim.log)) == 1
+    finally:
+        renderer.close()
+    with pytest.raises(wec.RendererError) as caught:
+        start(chrome_sim, allow_software=False, timeout=10)
+    assert caught.value.code == "software_renderer"
+
+
+def render_steps(renderer, n):
+    """Render ``n`` steps: [(step number, message)] of each speed warning."""
+    warned = []
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        warnings.simplefilter("ignore", ResourceWarning)
+        for step in range(1, n + 1):
+            before = len(log)
+            renderer.render(dict(STATE))
+            warned += [(step, str(w.message)) for w in log[before:] if "slow" in str(w.message)]
+    return warned
+
+
+def test_slow_hardware_rendering_warns_once(chrome_sim, monkeypatch):
+    monkeypatch.setattr(render_module, "_SLOW_STEPS", 1e9, raising=False)  # every rate is slow
+    chrome_sim.gpu = IGPU
+    renderer = start(chrome_sim, timeout=10)
+    try:
+        assert not renderer.software and chrome_sim.log == []
+        warned = render_steps(renderer, 30)
+        assert len(warned) == 1, "one speed warning"
+        step, text = warned[0]
+        assert step == render_module._SPEED_SKIP + render_module._SPEED_SAMPLES
+        assert IGPU in text and "hardware adapter" in text and "images=False" in text
+        assert re.search(r"[\d.]+ steps/s over 10 steps", text)
+    finally:
+        renderer.close()
+    again = start(chrome_sim, timeout=10)
+    try:
+        assert render_steps(again, 30) == [], "one speed warning per process"
+    finally:
+        again.close()
+
+
+def test_fast_hardware_rendering_does_not_warn(chrome_sim):
+    chrome_sim.gpu = RTX
+    renderer = start(chrome_sim, timeout=10)
+    try:
+        assert render_steps(renderer, 30) == [] and chrome_sim.log == []
+    finally:
+        renderer.close()
+
+
+def test_software_rendering_gets_no_second_warning_for_speed(chrome_sim, monkeypatch):
+    monkeypatch.setattr(render_module, "_SLOW_STEPS", 1e9, raising=False)
+    renderer = start(chrome_sim, allow_software=True, timeout=10)
+    try:
+        assert renderer.software and len(chrome_sim.log) == 1
+        assert render_steps(renderer, 30) == []
+    finally:
+        renderer.close()
+
+
+def test_a_page_that_throws_before_connecting_is_given_up_quickly(chrome_sim, monkeypatch):
+    """Without WebGL the page never opens its socket: the flag set fails after
+    a short grace instead of the whole timeout, and the next one is tried."""
+    import time
+
+    monkeypatch.setattr(render_module, "_PAGE_ERROR_GRACE", 0.2, raising=False)
+    chrome_sim.webgl = False
+    started = time.monotonic()
+    renderer = start(chrome_sim, allow_software=True, timeout=5)
+    try:
+        assert "--use-angle=swiftshader" in renderer.chrome_args
+        assert time.monotonic() - started < 5, "a failed page is not waited on for the timeout"
+    finally:
+        renderer.close()
+
+
+def test_close_closes_the_event_loop(chrome_sim):
+    renderer = start(chrome_sim, allow_software=True, timeout=10)
+    renderer.close()
+    assert renderer._loop.is_closed()
+    renderer.close()  # a second close is harmless
