@@ -4,9 +4,11 @@ hand-off, credentials on asset requests and the digest cache."""
 import asyncio
 import copy
 import hashlib
+import importlib
 import json
 import re
 import sys
+import time
 import warnings
 from types import ModuleType, SimpleNamespace
 
@@ -16,6 +18,8 @@ from conftest import ENV, OBS
 
 import world_engine_client as wec
 from world_engine_client import render as render_module
+
+env_module = importlib.import_module("world_engine_client.env")
 
 CAMERAS = {"front": {"width": 8, "height": 6}}
 STATE = {"type": "state", "frame_id": 0, "bodies": [], "robot": {}, "cameras": []}
@@ -147,6 +151,80 @@ def test_an_observation_without_poses_is_a_protocol_error(client_render):
     with pytest.raises(wec.ProtocolError, match="malformed observation"):
         env.observe()
     env.close()
+
+
+class Lease:
+    """The server's controller lease (90 s in remote_control.py), shortened: a
+    controller that sends nothing for ``seconds`` loses its session."""
+
+    PATHS = ("/control/heartbeat", "/control/reset", "/control/step", "/control/observe")
+
+    def __init__(self, stub, seconds):
+        self.seconds, self.last = seconds, None
+        connect = stub.responders["/control/connect"]
+
+        def on_connect(body):
+            self.last = time.monotonic()
+            return connect(body)
+
+        stub.responders["/control/connect"] = on_connect
+        for path in self.PATHS:
+            stub.responders[path] = self._checked(stub, path, stub.responders.get(path))
+
+    def _checked(self, stub, path, reply):
+        def handler(body):
+            if self.last is None or time.monotonic() - self.last > self.seconds:
+                self.last = None
+                return {
+                    "ok": False,
+                    "code": "not_connected",
+                    "error": "no controller session; call connect first",
+                }
+            self.last = time.monotonic()
+            return reply(body) if reply else stub.default(path, body)
+
+        return handler
+
+
+def test_heartbeats_keep_the_lease_while_the_renderer_starts(client_render, monkeypatch):
+    """A software start of a large scene can take longer than the lease. The
+    heartbeat runs from connect on, so the first reset still has a session."""
+    lease = Lease(client_render, seconds=1.5)
+    monkeypatch.setattr(env_module, "_HEARTBEAT_SECONDS", 0.1, raising=False)
+
+    class SlowStart(FakeRenderer):
+        def __init__(self, *args, **options):
+            time.sleep(2 * lease.seconds)
+            super().__init__(*args, **options)
+
+    monkeypatch.setattr(render_module, "LocalRenderer", SlowStart)
+    env = wec.connect("secret", url=client_render.url, images=True)
+    try:
+        during_start = client_render.paths()
+        obs, _ = env.reset(seed=0)
+        assert obs["rgb"]["front"].shape == (6, 8, 3)
+        env.step([0, 0, 0, 0])
+        assert "/control/heartbeat" in during_start
+    finally:
+        env.close()
+
+
+def test_a_failed_renderer_start_stops_the_heartbeat(client_render, monkeypatch):
+    monkeypatch.setattr(env_module, "_HEARTBEAT_SECONDS", 0.05, raising=False)
+
+    class FailedStart(FakeRenderer):
+        def __init__(self, *args, **options):
+            time.sleep(0.5)
+            raise render_module.RendererError("no Chrome", code="renderer_unavailable")
+
+    monkeypatch.setattr(render_module, "LocalRenderer", FailedStart)
+    with pytest.raises(wec.RendererError, match="no Chrome"):
+        wec.connect("secret", url=client_render.url, images=True)
+    paths = client_render.paths()
+    assert "/control/heartbeat" in paths, "heartbeats during the start"
+    assert paths[-1] == "/control/release"
+    time.sleep(0.3)
+    assert client_render.paths() == paths, "no heartbeat after connect failed"
 
 
 def test_asset_requests_carry_the_session_credentials(client_render):

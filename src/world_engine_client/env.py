@@ -31,6 +31,9 @@ from .errors import ProtocolError, RecoveryRequiredError, WorldEngineClientError
 MAX_RESPONSE = 64 * 1024 * 1024
 
 _PROTO = 3
+# Seconds between heartbeats. The server drops a proto-3 controller that sends
+# nothing for 90 s (its lease).
+_HEARTBEAT_SECONDS = 30.0
 
 
 def connect(
@@ -294,18 +297,21 @@ class RemoteEnv:
             raise ProtocolError(
                 "this server predates client rendering; upgrade it, or connect with images=False"
             )
+        if proto == 3:
+            # Start before the renderer: its start can take longer than the
+            # 90 s lease (a large scene rendered in software). connect() stops
+            # the thread if the start fails.
+            self._heartbeat_thread = threading.Thread(target=self._heartbeat, daemon=True)
+            self._heartbeat_thread.start()
         if local:
             from .render import LocalRenderer
 
             self.renderer = LocalRenderer(
                 self._open_render, bundle["scene_init"], bundle["digests"], **self._render_options
             )
-        if proto == 3:
-            self._heartbeat_thread = threading.Thread(target=self._heartbeat, daemon=True)
-            self._heartbeat_thread.start()
 
     def _heartbeat(self):
-        while not self._stop.wait(30):
+        while not self._stop.wait(_HEARTBEAT_SECONDS):
             try:
                 self._post("/control/heartbeat", {})
             except Exception as exc:

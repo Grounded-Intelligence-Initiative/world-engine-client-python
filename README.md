@@ -108,8 +108,10 @@ because only the rendering is timed. Real time (29.4 steps per second, one step
 per 0.034 s) is not the threshold: this renderer stays below it even on an
 RTX 4090.
 
-Heartbeats run every 30 seconds with a 90-second controller lease. Expiry freezes
-the simulation until explicit takeover. A lost action response is never retried:
+Heartbeats run every 30 seconds with a 90-second controller lease. They start at
+connect, before the renderer, so a renderer start longer than the lease keeps
+the session. Expiry freezes the simulation until explicit takeover. A lost
+action response is never retried:
 `RecoveryRequiredError` blocks further steps until explicit reset/reconnection.
 Pending recording data blocks reset with `RecordingPendingError` and is preserved.
 

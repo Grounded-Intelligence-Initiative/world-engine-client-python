@@ -17,6 +17,11 @@
   Before, every first frame had 15 s, a limit meant to catch a GPU path that
   hangs. On four CPU cores a 1.6M-splat scene needs about 27 s for its first
   frame, so connecting failed. Hardware adapters keep the 15 s limit.
+- Fixed: heartbeats now start at connect, before the renderer. A renderer
+  start longer than the server's 90 s controller lease (a Chromium download on
+  first use, or a large scene rendered in software) lost the session:
+  `connect()` returned, and the first `reset()` raised `ProtocolError` ("no
+  controller session; call connect first").
 - New speed warning for hardware adapters. The client times the rendering of
   10 steps after the first 2, and if the median is below 3 steps per second
   it issues one `RuntimeWarning` per process. The warning names the adapter
