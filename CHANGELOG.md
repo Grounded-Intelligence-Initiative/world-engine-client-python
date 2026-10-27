@@ -17,6 +17,12 @@
   Before, every first frame had 15 s, a limit meant to catch a GPU path that
   hangs. On four CPU cores a 1.6M-splat scene needs about 27 s for its first
   frame, so connecting failed. Hardware adapters keep the 15 s limit.
+- The renderer start keeps the 0.4.2 limit of `timeout` + 30 s (330 s by
+  default) for launching Chrome and loading the scene, now shared by all
+  Chrome flag sets. A software first frame gets `timeout` more. Downloading
+  Chromium no longer counts against the limit. A scene that never finishes
+  loading fails after about 330 s, as in 0.4.2, and the error lists what each
+  flag set hit.
 - Fixed: heartbeats now start at connect, before the renderer. A renderer
   start longer than the server's 90 s controller lease (a Chromium download on
   first use, or a large scene rendered in software) lost the session:

@@ -305,6 +305,7 @@ def _renderer_with(chromium, auto_install=True):
     renderer = object.__new__(render_module.LocalRenderer)  # no browser started
     renderer._pw = SimpleNamespace(chromium=chromium)
     renderer._auto_install = auto_install
+    renderer._deadline = time.monotonic() + 60
     return renderer
 
 
@@ -399,6 +400,7 @@ class PageSim:
     def __init__(self):
         self.gpu = None
         self.webgl = True
+        self.load = 0.0  # seconds a page takes to load the scene; None: it never does
         self.first_frame = 0.0  # seconds a page takes for its first frame
         self.handler = None
         self.launched = []  # flag sets, in launch order
@@ -488,8 +490,12 @@ class FakeSocket:
             return
         sim = self.browser.sim
         if msg["type"] == "scene_init":
+            if sim.load is None:
+                return  # the page never reports ready, as when an asset keeps failing
             ready = {"type": "ready", "gpu": self.browser.gpu, "software": self.software}
-            self._reply({**ready, "lighting": "studio"})
+            asyncio.get_running_loop().call_later(
+                sim.load, self._reply, {**ready, "lighting": "studio"}
+            )
         elif msg["type"] == "state":
             sim.frames.append((self.browser.args, msg["frame_id"], len(sim.log)))
             delay = sim.first_frame if self.rendered == 0 else 0.0
@@ -655,6 +661,57 @@ def test_a_page_that_throws_before_connecting_is_given_up_quickly(chrome_sim, mo
     try:
         assert "--use-angle=swiftshader" in renderer.chrome_args
         assert time.monotonic() - started < 5, "a failed page is not waited on for the timeout"
+    finally:
+        renderer.close()
+
+
+def test_a_scene_that_never_loads_fails_within_the_start_limit(chrome_sim, monkeypatch):
+    """The flag sets share one limit, timeout + _START_GRACE, for loading. A
+    scene that never loads does not get a full timeout per flag set, and the
+    error says what the first set hit."""
+    monkeypatch.setattr(render_module, "_START_GRACE", 0.3, raising=False)
+    chrome_sim.gpu, chrome_sim.load = RTX, None
+    started = time.monotonic()
+    with pytest.raises(wec.RendererError) as caught:
+        start(chrome_sim, timeout=3)
+    elapsed = time.monotonic() - started
+    assert 3 <= elapsed < 3 + 0.3 + 1.5, f"failed after {elapsed:.1f} s"
+    assert "scene loading timed out" in str(caught.value)
+    assert caught.value.code == "renderer_unavailable"
+
+
+def test_a_software_first_frame_gets_the_timeout_after_a_long_load(chrome_sim, monkeypatch):
+    """Loading used most of the start limit; the software first frame still
+    gets the whole timeout."""
+    monkeypatch.setattr(render_module, "_START_GRACE", 0.3, raising=False)
+    chrome_sim.load = chrome_sim.first_frame = 1.5
+    renderer = start(chrome_sim, allow_software=True, timeout=2)
+    try:
+        assert renderer.software and "--use-angle=swiftshader" in renderer.chrome_args
+    finally:
+        renderer.close()
+
+
+def test_downloading_chromium_does_not_count_against_the_start(chrome_sim, monkeypatch):
+    monkeypatch.setattr(render_module, "_START_GRACE", 0.3, raising=False)
+    chrome_sim.gpu = RTX
+    installed = []
+    launch = chrome_sim.launch
+
+    async def missing_until_installed(channel=None, args=(), **kw):
+        if not installed:
+            raise RuntimeError("Executable doesn't exist at /x/chrome\nRun: playwright install")
+        return await launch(channel, args, **kw)
+
+    def download():
+        time.sleep(2)
+        installed.append(True)
+
+    monkeypatch.setattr(chrome_sim, "launch", missing_until_installed)
+    monkeypatch.setattr(render_module, "install_chromium", download)
+    renderer = start(chrome_sim, timeout=1, auto_install=True)
+    try:
+        assert installed and not renderer.software
     finally:
         renderer.close()
 

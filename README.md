@@ -97,16 +97,21 @@ four CPU cores, a 400k-splat scene took 6–7 s per step and a 1.6M-splat scene
 off, and then a machine without hardware WebGL raises `RendererError`. If this
 machine has a GPU and still renders in software, check `chrome://gpu`.
 
+Starting the renderer may take `timeout` + 30 seconds (330 s by default) to
+launch Chrome and load the scene, over all of Chrome's flag sets together, and
+`timeout` more for a software first frame. Downloading Chromium does not count.
+`render_options={"timeout": 600}` gives a slow machine more time.
+
 On a hardware adapter, the client times the rendering of the first steps
 (10 steps, after 2 untimed ones). If the median is below 3 steps per second, it
 issues one `RuntimeWarning` per process with the adapter's name and the measured
 rate, and suggests `images=False` or fewer cameras. The threshold comes from
 measurement: on an RTX 4090 with three 256×256 cameras, this renderer drew
-0.4M–1.6M splat scenes at 6.8–17.2 steps per second (render only, idle machine),
-and 3 is about half of the slowest of these. Network latency does not count,
-because only the rendering is timed. Real time (29.4 steps per second, one step
-per 0.034 s) is not the threshold: this renderer stays below it even on an
-RTX 4090.
+0.4M–1.6M splat scenes at 6.8–17.2 steps per second (render only, measured
+2026-10-26 on a GPU that also ran a desktop), and 3 is about half of the slowest
+of these. Network latency does not count, because only the rendering is timed.
+Real time (29.4 steps per second, one step per 0.034 s) is not the threshold:
+this renderer stays below it even on an RTX 4090.
 
 Heartbeats run every 30 seconds with a 90-second controller lease. They start at
 connect, before the renderer, so a renderer start longer than the lease keeps

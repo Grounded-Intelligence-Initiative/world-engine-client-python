@@ -74,6 +74,11 @@ _SOFTWARE = ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swift
 # held to this; software rendering is slow, not stuck, and gets the full timeout.
 _PROBE_SECONDS = 15.0
 _PAGE_ERROR_GRACE = 5.0  # seconds a page that threw before connecting gets to connect
+# Launching Chrome and loading the scene, over all flag sets together, may take
+# ``timeout`` plus this many seconds. Without a shared limit, a scene that never
+# loads would cost a full timeout per flag set. A software first frame gets the
+# whole ``timeout`` on top, and a Chromium download does not count.
+_START_GRACE = 30.0
 # Software adapters by their WebGL renderer name: SwiftShader, Mesa's llvmpipe
 # and lavapipe, Windows' WARP ("Microsoft Basic Render Driver").
 _SOFTWARE_GPU = re.compile(
@@ -181,7 +186,9 @@ class LocalRenderer:
     credentials and returns a readable response. Without hardware WebGL the
     page renders in software after a RuntimeWarning; ``allow_software=False``
     makes that an error. ``timeout`` bounds loading the page, loading the scene
-    and each frame."""
+    and each frame. The start as a whole, over all Chrome flag sets, gets
+    ``timeout`` + 30 s, and ``timeout`` more for a software first frame;
+    downloading Chromium does not count."""
 
     def __init__(
         self,
@@ -221,16 +228,17 @@ class LocalRenderer:
         self._ready = None
         self._page_error: dict | None = None
         self._console: list[str] = []
+        self._failures: list[str] = []  # "<flag set> -> <error>" for each set that failed
         self._http = None
         self._render_seconds: list[float] = []
         self._download_lock = threading.Lock()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
+        # The start may move this: see _attempt and _launch.
+        self._deadline = time.monotonic() + timeout + _START_GRACE
         try:
-            # Loading the page, loading the scene and a software first frame may
-            # each take up to ``timeout``; this limit only catches a stuck start.
-            self._call(self._start(), 3 * timeout + 60 * len(self._candidates))
+            self._wait_for_start()
         except BaseException:
             self.close()
             raise
@@ -274,6 +282,26 @@ class LocalRenderer:
         self.close()
 
     # ----- loop thread ---------------------------------------------------------- #
+    def _wait_for_start(self) -> None:
+        """Run the start on the loop thread until it ends or the deadline
+        passes. The start can move the deadline, so it is read every second."""
+        began = time.monotonic()
+        future = asyncio.run_coroutine_threadsafe(self._start(), self._loop)
+        while not future.done() and time.monotonic() < self._deadline:
+            try:
+                future.result(max(0.0, min(self._deadline - time.monotonic(), 1.0)))
+            except TimeoutError:
+                pass
+        if future.done():
+            future.result()
+            return
+        future.cancel()
+        detail = " | ".join(self._failures or self._console[-5:]) or "no flag set finished"
+        raise RendererError(
+            f"the local renderer did not start within {time.monotonic() - began:.0f} s: {detail}",
+            code="renderer_unavailable",
+        )
+
     def _call(self, coro, timeout):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
@@ -339,6 +367,7 @@ class LocalRenderer:
                 return
             except RendererError as exc:
                 failures.append((exc, args))
+                self._failures.append(f"{' '.join(args)} -> {exc}")
                 await self._close_browser()
         no_hardware = any(e.code == "software_renderer" for e, _ in failures)
         if no_hardware and not self._allow_software:
@@ -353,8 +382,7 @@ class LocalRenderer:
                 ],
             )
         raise RendererError(
-            "no Chrome configuration rendered a frame: "
-            + " | ".join(f"{' '.join(a)} -> {e}" for e, a in failures),
+            "no Chrome configuration rendered a frame: " + " | ".join(self._failures),
             code="renderer_unavailable",
         )
 
@@ -415,6 +443,8 @@ class LocalRenderer:
                 stacklevel=1,
             )
             limit = self._timeout
+            # However long loading took, this frame gets the whole timeout.
+            self._deadline = max(self._deadline, time.monotonic() + limit + _START_GRACE)
         probe = {
             "type": "state",
             "bodies": [],
@@ -469,7 +499,13 @@ class LocalRenderer:
             except Exception as exc:  # noqa: BLE001 - try the next browser
                 errors.append(str(exc))
         if self._auto_install and _browser_missing(errors[-1]):
-            await asyncio.to_thread(install_chromium)
+            # A download is slow, not stuck: it does not count against the start.
+            deadline, self._deadline = self._deadline, float("inf")
+            downloading = time.monotonic()
+            try:
+                await asyncio.to_thread(install_chromium)
+            finally:
+                self._deadline = deadline + time.monotonic() - downloading
             try:
                 return await self._open(None, args)
             except Exception as exc:  # noqa: BLE001 - reported below
