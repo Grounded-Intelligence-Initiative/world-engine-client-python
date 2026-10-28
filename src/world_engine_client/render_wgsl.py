@@ -433,9 +433,7 @@ def drawn_assets(scene_init: dict, digests: dict[str, str]) -> dict[str, str]:
     the robot links, an HDRI or lighting asset. Not the objects' GLBs (the
     browser path's), so a session of D does not download them; when D cannot
     draw the scene, the browser path downloads the rest."""
-    urls = {
-        (scene_init.get(key) or {}).get("url") for key in ("splat", "hdri", "lighting")
-    }
+    urls = {(scene_init.get(key) or {}).get("url") for key in ("splat", "hdri", "lighting")}
     for mesh in scene_init.get("meshes") or []:
         urls.add(mesh.get("wem"))
     for link in (scene_init.get("robot") or {}).get("links") or []:
