@@ -145,6 +145,21 @@ def test_sparse_and_dense_rewards_are_never_scaled(stub, reward_type, task_progr
 
 
 @pytest.mark.parametrize(
+    "reward_type,points",
+    [("dense", False), ("sparse", False), (None, True)],
+    ids=["dense", "sparse", "older-server"],
+)
+def test_the_env_reward_type_decides_over_the_info(stub, reward_type, points):
+    """Only a staged reward is in points, even if a step's info had totals.
+    A server without reward_type sends totals only for a staged reward."""
+    steps = [(0.125, progress(0.5), False), (0.375, progress(2.0), True)]
+    serve(stub, steps, reward_type=reward_type)
+    with wec.connect("secret", url=stub.url, normalize_reward=False) as env:
+        rewards, _ = episode(env, 2)
+    assert rewards == ([0.5, 1.5] if points else [0.125, 0.375])
+
+
+@pytest.mark.parametrize(
     "task_progress",
     [
         None,

@@ -76,10 +76,11 @@ def connect(
     it. The server divides a ``staged`` reward by the task's total points, so an
     episode that finishes sums to 1.0. With False a staged reward comes back in
     points, ``reward * info["task_progress"]["reward"]["max"]``: the points the
-    step earned, less the failure penalty on the step that fails. Over an
-    episode from :meth:`RemoteEnv.reset` they add up to ``earned - penalty`` of
-    the last ``info["task_progress"]["reward"]``. ``sparse`` and ``dense``
-    rewards come back unchanged either way."""
+    step earned, less the failure penalty on the step that fails. A step that
+    gives partial credit back is negative without a failure. Over an episode
+    from :meth:`RemoteEnv.reset` they add up to ``earned - penalty`` of the last
+    ``info["task_progress"]["reward"]``. ``sparse`` and ``dense`` rewards, as
+    the env's ``reward_type`` names them, come back unchanged either way."""
     if render not in ("auto", "local"):
         raise ValueError("render must be 'auto' or 'local': servers no longer render camera images")
     if not isinstance(normalize_reward, bool):
@@ -189,7 +190,14 @@ class RemoteEnv:
             return reward
         progress = info.get("task_progress")
         totals = progress.get("reward") if isinstance(progress, dict) else None
-        if totals is None and self.metadata.get("reward_type") != "staged":
+        kind = self.metadata.get("reward_type")
+        if kind is None:
+            # A server older than staged rewards, or no task: only a staged
+            # reward has totals in the step's info.
+            staged = totals is not None
+        else:
+            staged = kind == "staged"
+        if not staged:
             return reward
         total = totals.get("max") if isinstance(totals, dict) else None
         points = reward * total if type(total) in (int, float) and total > 0 else math.nan

@@ -7,9 +7,11 @@
   `info["task_progress"]["reward"]["max"]`, the task's total points. A step pays
   the points it earned, less the failure penalty on the step that fails, so the
   rewards of an episode add up to `earned - penalty` of its last
-  `info["task_progress"]["reward"]`. `sparse` and `dense` rewards come back
-  unchanged, and so does every reward with the default. The server still sends
-  normalized rewards, so older clients see no change.
+  `info["task_progress"]["reward"]`. With partial credit on, a step that gives
+  partial credit back has a negative reward, though nothing failed. `sparse` and
+  `dense` rewards come back unchanged, and so does every reward with the
+  default. The server still sends normalized rewards, so older clients see no
+  change.
 - `normalize_reward` takes `True` or `False` only. Anything else raises
   `TypeError` before any request.
 - With `normalize_reward=False`, a staged step whose info has no usable
