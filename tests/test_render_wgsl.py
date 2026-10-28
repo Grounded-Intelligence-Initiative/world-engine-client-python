@@ -536,8 +536,8 @@ def _d_opens():
         pytest.skip(f"no adapter renders here: {exc}")
 
 
-def _wem1_without(key: str) -> bytes:
-    """The test box's WEM1 with a field of its JSON record left out."""
+def _wem1_record(change) -> bytes:
+    """The test box's WEM1 with its JSON record changed by ``change(doc)``."""
     import json as _json
     import struct
 
@@ -546,30 +546,50 @@ def _wem1_without(key: str) -> bytes:
     data = d_scene.box_wem1()
     _, jn, bn = struct.unpack("<III", data[4:16])
     doc = _json.loads(data[16 : 16 + jn])
-    doc.pop(key)
+    change(doc)
     js = _json.dumps(doc).encode()
     js += b" " * (-len(js) % 4)
     return b"WEM1" + struct.pack("<III", 1, len(js), bn) + js + data[16 + jn :]
+
+
+def _wem1_without(key: str) -> bytes:
+    """The test box's WEM1 with a field of its JSON record left out."""
+    return _wem1_record(lambda doc: doc.pop(key))
+
+
+WEM1S = {
+    # a WEM1 record without its primitives
+    "broken wem": lambda: _wem1_without("primitives"),
+    # a GLB with GPU instances: three draws each instance, D would draw one
+    "instanced": lambda: _wem1_record(
+        lambda doc: doc.update(unsupported=["EXT_mesh_gpu_instancing"])
+    ),
+    # a WEM1 cut off inside its header
+    "truncated wem": lambda: b"WEM1\x01\x00\x00\x00",
+}
 
 
 @pytest.mark.parametrize(
     "change, why",
     [
         ("no wem", "no WEM1"),  # an engine that sent protocol 2 without the object's WEM1
-        ("broken wem", "primitives"),  # a WEM1 record without its primitives
+        ("broken wem", "primitives"),
+        ("instanced", "EXT_mesh_gpu_instancing"),
+        ("truncated wem", "unpack requires"),
     ],
 )
 def test_a_mesh_d_cannot_draw_is_drawn_by_the_browser_path(stub, chrome, monkeypatch, change, why):
-    """Renderer D leaves no object out: an object it cannot draw makes the
-    scene the browser path's, with a warning that says why."""
+    """Renderer D leaves no object out: an object it cannot draw, or would draw
+    otherwise than three (mesh_data.UNDRAWN), makes the scene the browser
+    path's, with a warning that says why."""
     import d_scene
 
     _d_opens()
     # renderer D starts here whatever the adapter (on a CPU adapter the client
     # would first try Chrome on the GPU: tested below)
     monkeypatch.setattr(render_wgsl, "chrome_may_be_faster", lambda *a, **k: False)
-    if change == "broken wem":
-        monkeypatch.setitem(d_scene.ASSETS, "/__asset/1.wem1", _wem1_without("primitives"))
+    if change in WEM1S:
+        monkeypatch.setitem(d_scene.ASSETS, "/__asset/1.wem1", WEM1S[change]())
     platform = DPlatform(stub, encrypted=False)
     if change == "no wem":
         base = platform.scene_init

@@ -1,11 +1,11 @@
 {
   "comment": "Copied by scripts/sync_wgsl.py from the engine repository; change these files there, not here.",
   "pipeline": "wgsl/1",
-  "engine_commit": "6cbffd03c94395da16143b42feadbb088a15c0a9",
+  "engine_commit": "ca8d7b1023b7c01e34b8f67474ee8e562fed9e3d",
   "files": {
     "README.md": {
       "source": "frontend/src/render/wgsl/README.md",
-      "sha256": "496c013831a8ce53ef640b497817c374a1c8deb0828b5c32b33f7ef1580ecf0d"
+      "sha256": "8db65a43c2be7d5e21000efc31c487327c5ce680f6e8a9604f27b2b74092a881"
     },
     "__init__.py": {
       "source": "world_engine/renderer/wgsl/__init__.py",
@@ -33,7 +33,7 @@
     },
     "lighting.py": {
       "source": "world_engine/renderer/wgsl/lighting.py",
-      "sha256": "a561ec9e77ea1162ec5af6478212d5acb87c3f411684ddb2da469914ccad9915"
+      "sha256": "e93fed3b15b2829970d0a4971e1dba6900f045576abbcbdfaaa1f6579c87352e"
     },
     "material.wgsl": {
       "source": "frontend/src/render/wgsl/material.wgsl",
@@ -45,7 +45,7 @@
     },
     "mesh_data.py": {
       "source": "world_engine/renderer/wgsl/mesh_data.py",
-      "sha256": "afd788d3c2dcb1cfa37f69710c1c3115c1bf9670e29b11367f95f849d6318506"
+      "sha256": "f59d5749787be04c42fffb2ff20aae4ce12bf90a0b92f76f057733a8ef0804f7"
     },
     "mesh_pass.py": {
       "source": "world_engine/renderer/wgsl/mesh_pass.py",
@@ -65,7 +65,7 @@
     },
     "render_wgsl.py": {
       "source": "world_engine/renderer/wgsl/render_wgsl.py",
-      "sha256": "d3cb3dcc6b39aff6658ab704784182ad9025fea98630bd862224cec1f9091aa1"
+      "sha256": "cf3397452a12dfb2df5506fc7f19c4a0c31033436cf9a305983b3e7cb98c6b12"
     },
     "resolve.wgsl": {
       "source": "frontend/src/render/wgsl/resolve.wgsl",

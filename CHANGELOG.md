@@ -35,9 +35,10 @@
   browser path, as before. So does a newer server for a scene the pipeline
   cannot draw as the capture page does (a SuperSplat compressed PLY, an
   OpenEXR HDRI compressed with PIZ, PXR24, B44 or DWA, an object whose GLB
-  did not compile to WEM1, a lighting asset); it says why
-  (`protocol_reason`), and the client passes that on in a `RuntimeWarning`
-  and in `info["render"]["reason"]`.
+  did not compile to WEM1, an object whose GLB has GPU instancing, lines or
+  points, a skin, morph targets, its own lights or compressed geometry, a
+  lighting asset); it says why (`protocol_reason`), and the client passes
+  that on in a `RuntimeWarning` and in `info["render"]["reason"]`.
 - A session of renderer D downloads the assets it draws: the splat, the
   objects' WEM1, the robot links and an HDRI. The objects' GLBs, which only
   the browser path reads, stay on the server.
@@ -61,9 +62,10 @@
   remembered for a day. `render_options={"renderer": "wgsl"}` or an
   `adapter` of `"software"` or `"name:..."` keeps renderer D.
 - A scene renderer D cannot draw (a PLY, WEM1 or HDRI it does not read, an
-  object the server sent without its WEM1, more splats than the GPU holds)
-  is drawn by the browser path, with a `RuntimeWarning`, where Playwright is
-  installed; `renderer="wgsl"` raises instead.
+  object the server sent without its WEM1 or with content three draws and D
+  does not, more splats than the GPU holds) is drawn by the browser path,
+  with a `RuntimeWarning`, where Playwright is installed; `renderer="wgsl"`
+  raises instead.
 - The `render` extra now brings `wgpu==0.32.0` and, on Linux x86_64 and
   aarch64, `world-engine-swiftshader==0.1.0`. Renderer D adds 10.7 MB to an
   install that has numpy and Pillow on x86_64, 16.4 MB on aarch64.

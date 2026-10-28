@@ -1218,8 +1218,11 @@ class SplatRenderer:
     ) -> np.ndarray:
         """The capture page's environment bake (sceneEnvironment.ts): the splats
         seen from ``center`` on the six 90-degree faces of a size^2 cube, colours
-        decoded to linear (Spark's encodeLinear) and blended in 8 bits over the
-        page's clear colour as a linear render target stores it, no meshes.
+        decoded to linear (Spark's encodeLinear) and blended over the page's
+        clear colour in this renderer's colour target, then rounded to 8 bits
+        once, as a linear 8-bit render target stores the page's (the page blends
+        in that target's 8 bits; the adapters here then bake the same probe),
+        no meshes.
         render_size: Spark's renderSize for the splat sizes (None: the face);
         max_pixel_radius: the bake renderer's cap (None: this renderer's).
         Returns (6, size, size, 4) uint8 faces in three's read-back order (GL
@@ -1330,8 +1333,9 @@ class WgslRenderer:
     glb_to_wem1: converts a mesh URL that has no WEM1 (benches with recorded
     traces; the engine compiles WEM1 itself). strict: a part of the scene this
     host would leave out or light otherwise than the capture page (a GLB
-    without its WEM1, a robot link it cannot fetch, an HDRI or lighting asset
-    it cannot read) raises ValueError instead of a RuntimeWarning
+    without its WEM1, a WEM1 whose GLB has content three draws and this host
+    does not, mesh_data.UNDRAWN, a robot link it cannot fetch, an HDRI or
+    lighting asset it cannot read) raises ValueError instead of a RuntimeWarning
     (world-engine-client: the browser path then draws the scene). The other
     options go to SplatRenderer (color_format, wgsl_dir, memory_limit, ...).
 
@@ -1453,9 +1457,9 @@ class WgslRenderer:
                     warnings.warn(
                         f"the light probe's mean luminance {probe.mean:.4f} is within "
                         f"{PROBE_MARGIN_WARN:.0%} of the {SCENE_ENV_MIN_MEAN} threshold between "
-                        "the scene bake and the studio lights; another adapter (8-bit blending "
-                        "rounds differently, the CPU adapters most) can light this scene the "
-                        "other way",
+                        "the scene bake and the studio lights; the capture page, which blends "
+                        "its bake in 8 bits, or another adapter can light this scene the other "
+                        "way",
                         RuntimeWarning,
                         3,
                     )

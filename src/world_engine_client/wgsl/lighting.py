@@ -152,9 +152,11 @@ def dominant_light_direction(faces: np.ndarray, above_horizon: bool = True) -> P
 
 
 # The bake is used when its probe's mean luminance reaches SCENE_ENV_MIN_MEAN;
-# the two set-ups look very different, and adapters differ in how they round
-# the bake's 8-bit blending (lavapipe's indoor probe is 1.2 % brighter than the
-# RTX 4090's). Within this fraction of the threshold the host warns.
+# the two set-ups look very different. The host blends its bake above 8 bits and
+# rounds once: the RTX 4090, lavapipe and SwiftShader bake the indoor probe
+# within 0.003 % of each other. Blended in an 8-bit target, as the capture page
+# blends, the RTX 4090's indoor probe is 0.8 % brighter and lavapipe's 1.2 %
+# brighter than that. Within this fraction of the threshold the host warns.
 PROBE_MARGIN_WARN = 0.05
 
 

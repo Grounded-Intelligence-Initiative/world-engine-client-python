@@ -100,8 +100,9 @@ mesh is in front (0.5/255 without the shadow). `render_options={"renderer":
 "chrome"}` keeps the browser path's images. A newer server answers protocol 1
 for a scene `wgsl/1` cannot draw as the capture page does (a SuperSplat
 compressed PLY, an OpenEXR HDRI with PIZ, PXR24, B44 or DWA compression, an
-object whose GLB did not compile to WEM1, a lighting asset) and says why; the
-client warns once with that reason. A session of renderer D downloads the
+object whose GLB did not compile to WEM1 or has GPU instancing, lines or
+points, a skin, morph targets, its own lights or compressed geometry, a
+lighting asset) and says why; the client warns once with that reason. A session of renderer D downloads the
 assets it draws (the splat, the objects' WEM1, the robot links, an HDRI) and
 leaves the objects' GLBs, which only the browser path reads, on the server.
 
@@ -136,8 +137,9 @@ remembers that for a day. `render_options={"renderer": "wgsl"}`, or an
 `adapter` of `"software"` or `"name:..."`, keeps renderer D.
 
 When no adapter renders, or renderer D cannot draw the scene (a PLY, WEM1 or
-HDRI it does not read, an object the server sent without its WEM1, more splats
-than the GPU holds), the browser path is tried
+HDRI it does not read, an object the server sent without its WEM1 or with
+content three draws and D does not, more splats than the GPU holds), the
+browser path is tried
 (headless Chrome with its own SwiftShader) with a `RuntimeWarning`, and when
 that fails too, connect raises `RendererError` with the fixes:
 `apt install libvulkan1 mesa-vulkan-drivers`, the container settings, or

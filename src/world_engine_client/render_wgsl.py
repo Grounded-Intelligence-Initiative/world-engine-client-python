@@ -62,9 +62,10 @@ class NoRenderAdapter(RendererError):
 class SceneNotDrawable(RendererError):
     """Renderer D cannot draw this scene as the browser path would: an asset it
     does not read (``code`` asset_mismatch: a splat PLY, a WEM1 mesh or an HDRI
-    it does not take, a mesh the server sent without its WEM1), or more than
-    the device's memory holds (renderer_unavailable). The browser path may
-    still draw it."""
+    it does not take, a mesh the server sent without its WEM1, a WEM1 whose GLB
+    has content three draws and D does not, such as GPU instances or lines),
+    or more than the device's memory holds (renderer_unavailable). The browser
+    path may still draw it."""
 
 
 def available() -> bool:

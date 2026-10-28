@@ -8,6 +8,14 @@ mesh pass (three.js's MeshStandardMaterial as the capture page draws it), the
 key light's shadow map, and the environment prefilter (three's
 PMREMGenerator); M-D3 the colour target above 8 bits and its resolve.
 
+A pipeline version names one drawing: these shaders and what the host feeds
+them (lighting, bake, materials, shadow). world-engine-client 0.7.0 is the
+first release with `wgsl/1`. `tests/test_render_protocol.py` pins the shaders'
+SHA-256 as it ships them, and `tests/test_wgsl_pin.py` the images they and the
+Python host draw on Mesa's lavapipe. Drawing differently after that release
+means a new version in `pipeline.json`, with the engine still offering this
+one to the clients that have it.
+
 ## Modules
 
 `pipeline.json` names the pipeline version and lists each module as a list of

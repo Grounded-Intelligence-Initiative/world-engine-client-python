@@ -371,6 +371,36 @@ def robot_material(rgba, finish: str = "painted") -> Material:
 
 _SRGB_TABLE = srgb_to_linear(np.arange(256) / 255.0).astype(np.float32)
 
+# What a WEM1 record lists under "unsupported" (world_engine/assets/wem1.py) that
+# makes the capture page draw the object otherwise than this host: three's
+# GLTFLoader (0.180) draws GPU instances, lines and points, skinned and morphed
+# vertices and the GLB's own lights, which WEM1 leaves out or keeps unposed; it
+# fails to load a GLB with compressed geometry (no decoder on the page) or a
+# texture without a PNG, JPEG, WebP or AVIF source, where this host draws the
+# rest; an external image file is the page's to fetch. A strict host refuses
+# such a WEM1. What the record lists besides (a material extension drawn as
+# MeshStandardMaterial, a map on TEXCOORD_2 or 3, a camera) is drawn close to
+# the page and only warns. The engine's serving/render_protocol.py restates this
+# set (tests/test_render_protocol.py holds the two to the same strings).
+UNDRAWN = frozenset(
+    {
+        "EXT_mesh_gpu_instancing",
+        "points or lines",
+        "skin",
+        "morph targets",
+        "KHR_lights_punctual",
+        "KHR_draco_mesh_compression (primitive not drawn)",
+        "EXT_meshopt_compression (primitive not drawn)",
+        "texture without a PNG/JPEG/WebP/AVIF source (KTX2?)",
+        "external image file",
+    }
+)
+
+
+def undrawn(doc: dict) -> list[str]:
+    """The entries of a WEM1 record's "unsupported" list that are in UNDRAWN."""
+    return sorted(set(doc.get("unsupported") or []) & UNDRAWN)
+
 
 def decode_wem1(data: bytes) -> tuple[dict, bytes]:
     if data[:4] != b"WEM1":
@@ -491,9 +521,18 @@ class MeshScene:
         tr.image = image_of[key]
         return tr
 
-    def add_wem1(self, owner: int, data: bytes) -> list[int]:
-        """The primitives of a WEM1 object; returns the materials it made."""
+    def add_wem1(
+        self, owner: int, data: bytes, *, strict: bool = False, name: str = "WEM1"
+    ) -> list[int]:
+        """The primitives of a WEM1 object (``name``, for messages); returns the
+        materials it made. strict: raise ValueError for a WEM1 whose GLB has
+        content in UNDRAWN (else it is drawn without that, with a warning)."""
         doc, body = decode_wem1(data)
+        if strict and undrawn(doc):
+            raise ValueError(
+                f"mesh {name}: its GLB has {', '.join(undrawn(doc))}, "
+                "which three draws and this host does not"
+            )
         for u in doc.get("unsupported") or []:
             self.warnings.append(f"WEM1: {u} not drawn as three draws it")
         decoded = []
@@ -602,8 +641,9 @@ class MeshScene:
         """fetch(url) -> bytes. glb_to_wem1: converts a GLB the engine did not
         compile (an older server); without it such a mesh is skipped with a
         warning, and so is a robot link that cannot be fetched (the capture
-        page skips it too). strict: raise ValueError for those instead (a
-        client that can let the browser path draw the scene)."""
+        page skips it too); a WEM1 whose GLB has content in UNDRAWN is drawn
+        without it, with a warning. strict: raise for those instead (a client
+        that can let the browser path draw the scene)."""
         s = cls()
         mesh_mats: dict[str, list[int]] = {}
         for m in scene_init.get("meshes") or []:
@@ -623,9 +663,9 @@ class MeshScene:
             oi = s.owner("body", mid, **kw)
             url = m.get("url") or ""
             if m.get("wem"):
-                mesh_mats[mid] = s.add_wem1(oi, fetch(m["wem"]))
+                mesh_mats[mid] = s.add_wem1(oi, fetch(m["wem"]), strict=strict, name=mid)
             elif url and url.lower().endswith(".glb") and glb_to_wem1 is not None:
-                mesh_mats[mid] = s.add_wem1(oi, glb_to_wem1(fetch(url)))
+                mesh_mats[mid] = s.add_wem1(oi, glb_to_wem1(fetch(url)), strict=strict, name=mid)
             elif url:
                 if strict:
                     raise ValueError(f"mesh {mid}: no WEM1 for {url}")
