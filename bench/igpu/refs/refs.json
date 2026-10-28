@@ -1,5 +1,5 @@
 {
- "made": "2026-10-28T10:04:47-0400",
+ "made": "2026-10-28T15:56:17-0400",
  "images": [
   [
    0,
@@ -23,11 +23,175 @@
   ]
  ],
  "made_with": {
-  "world-engine-client": "0.6.0",
-  "git": null,
-  "renderer_d": "95a26509775791b1e1526c3f2df201c3ff095f70d4b6bd579085f26a8c2c4b7f",
-  "matches_checkout": null,
-  "note": "written after the images were made (2026-10-28T10:04) by the renderer D of world-engine-client 562163a; render_wgsl.py, assets.py and wgsl/ were the same at the commit that adds this note"
+  "world-engine-client": "0.7.0",
+  "git": "v0.6.0-39-g2664176",
+  "renderer_d": "1b93966bd2ada3609d45fe7d10b00f4bc75ed04205ef3cd413c4fb7cb640e8fc",
+  "matches_checkout": true,
+  "spark_kept_from": "2026-10-28T10:04:47-0400"
+ },
+ "sets": {
+  "r2_400k": {
+   "spark_rtx4090": {
+    "adapter": {
+     "renderer": "chrome",
+     "adapter": "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4090/PCIe/SSE2, OpenGL ES 3.2)",
+     "software": false,
+     "browser": "headless-shell",
+     "browser_version": "148.0.7778.96",
+     "chrome_args": [
+      "--headless=new",
+      "--use-gl=angle",
+      "--use-angle=gl-egl",
+      "--ignore-gpu-blocklist",
+      "--no-sandbox"
+     ],
+     "lighting": "scene"
+    },
+    "images": {
+     "s000_third_person": "249fa00c4b84ea5542031606c01cae09a05e3638f954ad142355c4d094193ada",
+     "s000_top_down": "a9ef3a37690282d2c389ad22997eb1816862bdceefc9bed417998b75c4f5c961",
+     "s000_wrist": "537c420435efad6ba49bdd8d419f32246d148c5018c6107bd0c2a086491160f1",
+     "s100_wrist": "528da06eeb99f1c9c7a37fc3ac9c92973c66ec1f8ad4fbc0022e639ed076f27f",
+     "s199_wrist": "5ade7781494b339b19f51da6a03ea9a5abd6691ea8375dfa785f1d8de28cb3a4"
+    }
+   },
+   "d_rgba16float_rtx4090": {
+    "adapter": {
+     "renderer": "wgsl",
+     "pipeline": "wgsl/1",
+     "adapter": "NVIDIA GeForce RTX 4090",
+     "adapter_type": "DiscreteGPU",
+     "backend": "Vulkan",
+     "software": false,
+     "step": "system",
+     "color_format": "rgba16float",
+     "lighting": "scene",
+     "vendor": "NVIDIA",
+     "description": "580.178.04",
+     "search_seconds": 1.42,
+     "cached": false,
+     "trail": [
+      {
+       "step": "system",
+       "ok": true,
+       "adapters": [
+        "NVIDIA GeForce RTX 4090",
+        "llvmpipe (LLVM 15.0.7, 256 bits)"
+       ],
+       "picked": "NVIDIA GeForce RTX 4090",
+       "error": null,
+       "seconds": 1.42,
+       "import_error": null
+      }
+     ]
+    },
+    "images": {
+     "s000_third_person": "c3c18a63632f10d06a3390d77b5b553bf940487023bbcb4a1452708d423034f4",
+     "s000_top_down": "6fe256b5aadb86ef4174d42b2c2379ef7edf503140ae86bcb27d5454d5fa136f",
+     "s000_wrist": "6fe256b5aadb86ef4174d42b2c2379ef7edf503140ae86bcb27d5454d5fa136f",
+     "s100_wrist": "7a919ef1bcc0d29a6eea6a459582ccfe076d9d1d3da561df1a649c4a4dc6a873",
+     "s199_wrist": "6fe256b5aadb86ef4174d42b2c2379ef7edf503140ae86bcb27d5454d5fa136f"
+    }
+   },
+   "d_vs_spark_on_the_4090": {
+    "images": 5,
+    "mean": 0.4022,
+    "worst_image": 0.4206,
+    "signed_mean": 0.0401,
+    "max": 5,
+    "frac_gt2": 0.00057,
+    "frac_gt16": 0.0,
+    "per_image": {
+     "s000_third_person": 0.4206,
+     "s000_top_down": 0.4103,
+     "s000_wrist": 0.3591,
+     "s100_wrist": 0.4076,
+     "s199_wrist": 0.4135
+    },
+    "missing": []
+   }
+  },
+  "room200k": {
+   "spark_rtx4090": {
+    "adapter": {
+     "renderer": "chrome",
+     "adapter": "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4090/PCIe/SSE2, OpenGL ES 3.2)",
+     "software": false,
+     "browser": "headless-shell",
+     "browser_version": "148.0.7778.96",
+     "chrome_args": [
+      "--headless=new",
+      "--use-gl=angle",
+      "--use-angle=gl-egl",
+      "--ignore-gpu-blocklist",
+      "--no-sandbox"
+     ],
+     "lighting": "scene"
+    },
+    "images": {
+     "s000_third_person": "bc118bfea663c8663cec09f1519e0733c29d2e14b1e47129fe431ccc7ce3eb65",
+     "s000_top_down": "31657de411c2e6fe43d95964e23991d3ff0597e01c6f3b1812d45ff8f712e19c",
+     "s000_wrist": "6561a1e0a0876a0ada41d1730dbcb8fe92f5e84ed3b5431acc1c17284857a456",
+     "s100_wrist": "1725bc52fb872f433cb6582fc19398b3c1052fae46381f9e71d32dbd19b9e75a",
+     "s199_wrist": "a1f718b64a5542f927797ab3c99fe60195534532ff4b6539a476369d53630bf1"
+    }
+   },
+   "d_rgba16float_rtx4090": {
+    "adapter": {
+     "renderer": "wgsl",
+     "pipeline": "wgsl/1",
+     "adapter": "NVIDIA GeForce RTX 4090",
+     "adapter_type": "DiscreteGPU",
+     "backend": "Vulkan",
+     "software": false,
+     "step": "system",
+     "color_format": "rgba16float",
+     "lighting": "scene",
+     "vendor": "NVIDIA",
+     "description": "580.178.04",
+     "search_seconds": 1.42,
+     "cached": true,
+     "trail": [
+      {
+       "step": "system",
+       "ok": true,
+       "adapters": [
+        "NVIDIA GeForce RTX 4090",
+        "llvmpipe (LLVM 15.0.7, 256 bits)"
+       ],
+       "picked": "NVIDIA GeForce RTX 4090",
+       "error": null,
+       "seconds": 1.42,
+       "import_error": null
+      }
+     ]
+    },
+    "images": {
+     "s000_third_person": "d9128822ec6de0dd7410d1ba881a4f8651a33ba5484eec5d6474b4ac964af84d",
+     "s000_top_down": "535a476f74f8e703e3e4b01090e9fab8d37b099de0cb95f58b2fbe6f3c2fc921",
+     "s000_wrist": "597c7f7c216f68aac87104d616777eb797cf51be6ff14ce665bde1c99f343687",
+     "s100_wrist": "77fb553cca416dffba94b52ff4814adb57ffa06aeaa72cf91278a6ab2b6c2b44",
+     "s199_wrist": "bbac59c1454328538a74fef77143d45211d97a071d31e85818785add1dba225a"
+    }
+   },
+   "d_vs_spark_on_the_4090": {
+    "images": 5,
+    "mean": 1.629,
+    "worst_image": 1.9264,
+    "signed_mean": 0.2678,
+    "max": 38,
+    "frac_gt2": 0.46698,
+    "frac_gt16": 5e-05,
+    "per_image": {
+     "s000_third_person": 1.9264,
+     "s000_top_down": 1.8264,
+     "s000_wrist": 1.5107,
+     "s100_wrist": 1.445,
+     "s199_wrist": 1.4365
+    },
+    "missing": []
+   }
+  }
  },
  "machine": {
   "os": {
@@ -241,177 +405,15 @@
   ],
   "nvidia_smi": "NVIDIA GeForce RTX 4090, 580.178.04, 00000000:41:00.0\n",
   "packages": {
-   "world-engine-client": "0.6.0",
+   "world-engine-client": null,
    "world-engine-swiftshader": "0.1.0",
    "wgpu": "0.32.0",
    "numpy": "2.5.4",
    "Pillow": "13.0.0",
-   "playwright": "1.60.0",
+   "playwright": "1.64.1",
    "websockets": "17.3",
    "cryptography": "50.0.2"
   },
   "python": "3.12.11"
- },
- "sets": {
-  "r2_400k": {
-   "d_rgba16float_rtx4090": {
-    "adapter": {
-     "renderer": "wgsl",
-     "pipeline": "wgsl/1",
-     "adapter": "NVIDIA GeForce RTX 4090",
-     "adapter_type": "DiscreteGPU",
-     "backend": "Vulkan",
-     "software": false,
-     "step": "system",
-     "color_format": "rgba16float",
-     "vendor": "NVIDIA",
-     "description": "580.178.04",
-     "search_seconds": 1.576,
-     "cached": false,
-     "trail": [
-      {
-       "step": "system",
-       "ok": true,
-       "adapters": [
-        "NVIDIA GeForce RTX 4090",
-        "llvmpipe (LLVM 15.0.7, 256 bits)"
-       ],
-       "picked": "NVIDIA GeForce RTX 4090",
-       "error": null,
-       "seconds": 1.576,
-       "import_error": null
-      }
-     ]
-    },
-    "images": {
-     "s000_third_person": "c3c18a63632f10d06a3390d77b5b553bf940487023bbcb4a1452708d423034f4",
-     "s000_top_down": "6fe256b5aadb86ef4174d42b2c2379ef7edf503140ae86bcb27d5454d5fa136f",
-     "s000_wrist": "6fe256b5aadb86ef4174d42b2c2379ef7edf503140ae86bcb27d5454d5fa136f",
-     "s100_wrist": "7a919ef1bcc0d29a6eea6a459582ccfe076d9d1d3da561df1a649c4a4dc6a873",
-     "s199_wrist": "6fe256b5aadb86ef4174d42b2c2379ef7edf503140ae86bcb27d5454d5fa136f"
-    }
-   },
-   "spark_rtx4090": {
-    "adapter": {
-     "renderer": "chrome",
-     "adapter": "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4090/PCIe/SSE2, OpenGL ES 3.2)",
-     "software": false,
-     "browser": "headless-shell",
-     "browser_version": "148.0.7778.96",
-     "chrome_args": [
-      "--headless=new",
-      "--use-gl=angle",
-      "--use-angle=gl-egl",
-      "--ignore-gpu-blocklist",
-      "--no-sandbox"
-     ],
-     "lighting": "scene"
-    },
-    "images": {
-     "s000_third_person": "249fa00c4b84ea5542031606c01cae09a05e3638f954ad142355c4d094193ada",
-     "s000_top_down": "a9ef3a37690282d2c389ad22997eb1816862bdceefc9bed417998b75c4f5c961",
-     "s000_wrist": "537c420435efad6ba49bdd8d419f32246d148c5018c6107bd0c2a086491160f1",
-     "s100_wrist": "528da06eeb99f1c9c7a37fc3ac9c92973c66ec1f8ad4fbc0022e639ed076f27f",
-     "s199_wrist": "5ade7781494b339b19f51da6a03ea9a5abd6691ea8375dfa785f1d8de28cb3a4"
-    }
-   },
-   "d_vs_spark_on_the_4090": {
-    "images": 5,
-    "mean": 0.4022,
-    "worst_image": 0.4206,
-    "signed_mean": 0.0401,
-    "max": 5,
-    "frac_gt2": 0.00057,
-    "frac_gt16": 0.0,
-    "per_image": {
-     "s000_third_person": 0.4206,
-     "s000_top_down": 0.4103,
-     "s000_wrist": 0.3591,
-     "s100_wrist": 0.4076,
-     "s199_wrist": 0.4135
-    },
-    "missing": []
-   }
-  },
-  "room200k": {
-   "d_rgba16float_rtx4090": {
-    "adapter": {
-     "renderer": "wgsl",
-     "pipeline": "wgsl/1",
-     "adapter": "NVIDIA GeForce RTX 4090",
-     "adapter_type": "DiscreteGPU",
-     "backend": "Vulkan",
-     "software": false,
-     "step": "system",
-     "color_format": "rgba16float",
-     "vendor": "NVIDIA",
-     "description": "580.178.04",
-     "search_seconds": 1.576,
-     "cached": true,
-     "trail": [
-      {
-       "step": "system",
-       "ok": true,
-       "adapters": [
-        "NVIDIA GeForce RTX 4090",
-        "llvmpipe (LLVM 15.0.7, 256 bits)"
-       ],
-       "picked": "NVIDIA GeForce RTX 4090",
-       "error": null,
-       "seconds": 1.576,
-       "import_error": null
-      }
-     ]
-    },
-    "images": {
-     "s000_third_person": "d9128822ec6de0dd7410d1ba881a4f8651a33ba5484eec5d6474b4ac964af84d",
-     "s000_top_down": "535a476f74f8e703e3e4b01090e9fab8d37b099de0cb95f58b2fbe6f3c2fc921",
-     "s000_wrist": "597c7f7c216f68aac87104d616777eb797cf51be6ff14ce665bde1c99f343687",
-     "s100_wrist": "77fb553cca416dffba94b52ff4814adb57ffa06aeaa72cf91278a6ab2b6c2b44",
-     "s199_wrist": "bbac59c1454328538a74fef77143d45211d97a071d31e85818785add1dba225a"
-    }
-   },
-   "spark_rtx4090": {
-    "adapter": {
-     "renderer": "chrome",
-     "adapter": "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4090/PCIe/SSE2, OpenGL ES 3.2)",
-     "software": false,
-     "browser": "headless-shell",
-     "browser_version": "148.0.7778.96",
-     "chrome_args": [
-      "--headless=new",
-      "--use-gl=angle",
-      "--use-angle=gl-egl",
-      "--ignore-gpu-blocklist",
-      "--no-sandbox"
-     ],
-     "lighting": "scene"
-    },
-    "images": {
-     "s000_third_person": "bc118bfea663c8663cec09f1519e0733c29d2e14b1e47129fe431ccc7ce3eb65",
-     "s000_top_down": "31657de411c2e6fe43d95964e23991d3ff0597e01c6f3b1812d45ff8f712e19c",
-     "s000_wrist": "6561a1e0a0876a0ada41d1730dbcb8fe92f5e84ed3b5431acc1c17284857a456",
-     "s100_wrist": "1725bc52fb872f433cb6582fc19398b3c1052fae46381f9e71d32dbd19b9e75a",
-     "s199_wrist": "a1f718b64a5542f927797ab3c99fe60195534532ff4b6539a476369d53630bf1"
-    }
-   },
-   "d_vs_spark_on_the_4090": {
-    "images": 5,
-    "mean": 1.629,
-    "worst_image": 1.9264,
-    "signed_mean": 0.2678,
-    "max": 38,
-    "frac_gt2": 0.46698,
-    "frac_gt16": 5e-05,
-    "per_image": {
-     "s000_third_person": 1.9264,
-     "s000_top_down": 1.8264,
-     "s000_wrist": 1.5107,
-     "s100_wrist": 1.445,
-     "s199_wrist": 1.4365
-    },
-    "missing": []
-   }
-  }
  }
 }
