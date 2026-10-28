@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- The browser path's own browser, kept as the fallback of renderer D, follows
+  design doc 16 §8.1. Playwright is pinned in the `render` extra
+  (`playwright==1.60.0`, the engine's version), so every install downloads
+  the same headless Chromium build, Chrome Headless Shell 148.
+- Only the headless shell downloads (`playwright install --only-shell
+  chromium`): about 120 MB on Linux and Windows and 100 MB on macOS, where
+  Playwright's full Chromium and the shell came to 300 MB. It goes into a
+  directory of this package next to the render cache,
+  `<user cache dir>/digiarena/browsers` (`DIGIARENA_BROWSERS_DIR` moves it).
+  Playwright's own browser directory is neither used nor changed. An
+  installed Google Chrome is still used first.
+- The download starts in the background when a browser-path renderer starts,
+  while the scene downloads, and prints nothing on the terminal: neither the
+  old "downloading Chromium" line nor Playwright's progress. It is logged to
+  the `world_engine_client.render` logger. `python -m
+  world_engine_client.render install` downloads it by hand; `... where` shows
+  what is there.
+- A failed download is tried once per renderer start. Its error reaches the
+  caller with the fixes (the command above, a proxy or a download mirror,
+  `images=False`), where a generic "no Chrome configuration rendered a frame"
+  without fixes came before. So do the fixes for a missing browser and for
+  missing system libraries; the latter is now `python -m playwright
+  install-deps chromium`, which installs no browser.
+- `WE_RENDER_BROWSER=chrome` or `WE_RENDER_BROWSER=shell` makes the browser
+  path use only an installed Google Chrome or only the headless shell.
+  `info["render"]` of the browser path names the browser and its version.
+
 ## 0.6.0
 
 - Renderer D: camera images from a server with renderer D (render protocol 2)

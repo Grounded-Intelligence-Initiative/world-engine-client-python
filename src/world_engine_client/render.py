@@ -17,11 +17,17 @@ processes on this machine can reach both ports, so both want this session's
 random token: Playwright adds it to every request the page makes, and the
 WebSocket URL the page gets ends in it (BUG-32).
 
-Needs the ``render`` extra (Playwright, websockets, Pillow, cryptography) and a
-Chrome or Chromium: ``pip install 'world-engine-client[render]'``. An installed Google
-Chrome is used first; otherwise Playwright's Chromium, which is downloaded
-automatically the first time (``WE_RENDER_AUTO_INSTALL=0`` turns that off;
-``python -m playwright install chromium`` does it by hand).
+Needs the ``render`` extra (Playwright, websockets, Pillow, cryptography):
+``pip install 'world-engine-client[render]'``. An installed Google Chrome is
+used first. Otherwise Playwright's headless shell (Chrome Headless Shell, the
+build the pinned playwright names), which this package downloads once into a
+directory of its own next to the render cache (:func:`browsers_dir`), never
+into Playwright's. The download starts in the background when a renderer
+starts, so it overlaps the scene's, and prints nothing: it is logged to
+``world_engine_client.render``. ``WE_RENDER_AUTO_INSTALL=0`` turns it off;
+``python -m world_engine_client.render install`` does it by hand.
+``WE_RENDER_BROWSER`` (``auto``, ``chrome`` or ``shell``) uses one of the two
+only.
 
 Without a hardware GPU the images are rendered in software (SwiftShader), with
 a RuntimeWarning; ``allow_software=False`` refuses that instead. A hardware
@@ -49,6 +55,7 @@ import time
 import warnings
 from collections.abc import Callable
 from http import HTTPStatus
+from pathlib import Path
 
 import numpy as np
 
@@ -86,7 +93,7 @@ _PAGE_ERROR_GRACE = 5.0  # seconds a page that threw before connecting gets to c
 # Launching Chrome and loading the scene, over all flag sets together, may take
 # ``timeout`` plus this many seconds. Without a shared limit, a scene that never
 # loads would cost a full timeout per flag set. A software first frame gets the
-# whole ``timeout`` on top, and a Chromium download does not count.
+# whole ``timeout`` on top, and downloading the browser does not count.
 _START_GRACE = 30.0
 # Software adapters by their WebGL renderer name: SwiftShader, Mesa's llvmpipe
 # and lavapipe, Windows' WARP ("Microsoft Basic Render Driver").
@@ -106,15 +113,29 @@ _SPEED_SAMPLES = 10  # renders timed after those
 _slow_warned = False
 
 _INSTALL_FIXES = [
-    "pip install 'world-engine-client[render]' (Chromium downloads on first use)",
+    "pip install 'world-engine-client[render]' (the headless browser downloads on first use)",
     "or pass images=False for a state-only session",
 ]
+_SHELL_FIX = (
+    "python -m world_engine_client.render install (downloads the headless browser once, "
+    "about 100-120 MB)"
+)
 _SYSTEM_DEPS_FIX = (
     "on Linux, install Chromium's system libraries: "
-    "python -m playwright install --with-deps chromium (needs sudo)"
+    "python -m playwright install-deps chromium (needs sudo)"
 )
+# The browser path's own browser: Playwright's headless shell, the build of the
+# playwright the render extra pins, in a Playwright browsers directory of this
+# package (browsers_dir). Playwright's own directory (~/.cache/ms-playwright and
+# the like) is never used: what the user installs there may be another build,
+# and Playwright removes builds there that no installed playwright names.
+_SHELL_DIR = "chromium_headless_shell-"
+_SHELL_NAMES = ("chrome-headless-shell", "chrome-headless-shell.exe", "headless_shell")
+_BROWSERS = ("auto", "chrome", "shell")
 _install_lock = threading.Lock()
-_installed = False
+# The download in the background (prepare_browser): its thread and its error.
+_download_lock = threading.Lock()
+_download: dict = {"thread": None, "error": None}
 
 # Playwright sends the session token in this header with every request the
 # page makes; the loopback HTTP server refuses requests without it.
@@ -137,7 +158,10 @@ def _same_secret(sent: str, expected: str) -> bool:
 
 
 def _browser_missing(message: str) -> bool:
-    return "Executable doesn't exist" in message or "playwright install" in message
+    """A launch error that says the browser is not there."""
+    return any(
+        s in message for s in ("is not found", "Executable doesn't exist", "playwright install")
+    )
 
 
 def _system_deps_missing(message: str) -> bool:
@@ -146,37 +170,215 @@ def _system_deps_missing(message: str) -> bool:
 
 
 def _auto_install_enabled(option: bool | None) -> bool:
-    """Download Chromium when no browser is found, unless turned off by the
-    option or WE_RENDER_AUTO_INSTALL=0."""
+    """Download the headless browser when there is no browser to launch, unless
+    turned off by the option or WE_RENDER_AUTO_INSTALL=0."""
     if option is not None:
         return option
     return os.environ.get("WE_RENDER_AUTO_INSTALL", "1") != "0"
 
 
-def install_chromium() -> None:
-    """Download Playwright's Chromium, at most once per process.
+def browser_choice() -> str:
+    """The browser the browser path launches, from WE_RENDER_BROWSER: ``auto``
+    (the default: an installed Google Chrome, else this package's headless
+    shell), ``chrome`` or ``shell`` (that one only)."""
+    value = (os.environ.get("WE_RENDER_BROWSER") or "auto").strip().lower()
+    if value not in _BROWSERS:
+        raise ValueError(f"WE_RENDER_BROWSER must be auto, chrome or shell, not {value!r}")
+    return value
 
-    Used when neither an installed Chrome nor Playwright's Chromium is
-    available, so ``pip install 'world-engine-client[render]'`` is the only
-    step most users need. Progress goes to the terminal."""
-    global _installed
+
+def browsers_dir() -> Path:
+    """Where this package keeps its headless browser: DIGIARENA_BROWSERS_DIR,
+    else ``<user cache dir>/digiarena/browsers``, next to the render cache. It
+    is a Playwright browsers directory (what PLAYWRIGHT_BROWSERS_PATH names) of
+    this package's own; deleting it costs one download."""
+    env = os.environ.get("DIGIARENA_BROWSERS_DIR")
+    if env:
+        return Path(env).expanduser()
+    from .cache import user_cache_dir
+
+    return user_cache_dir() / "digiarena" / "browsers"
+
+
+def _shell_revision() -> str | None:
+    """The headless shell build the installed playwright downloads, from its
+    browsers.json; None without playwright."""
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("playwright")
+        if spec is None or not spec.origin:
+            return None
+        listing = Path(spec.origin).parent / "driver" / "package" / "browsers.json"
+        for entry in json.loads(listing.read_text()).get("browsers", []):
+            if entry.get("name") == "chromium-headless-shell":
+                return str(entry["revision"])
+    except (ImportError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return None
+
+
+def shell_executable(root: str | os.PathLike | None = None) -> Path | None:
+    """The headless shell of the installed playwright in ``root`` (default
+    :func:`browsers_dir`), or None. Only a finished download counts: Playwright
+    marks one with INSTALLATION_COMPLETE."""
+    rev = _shell_revision()
+    if rev is None:
+        return None
+    build = (Path(root) if root is not None else browsers_dir()) / f"{_SHELL_DIR}{rev}"
+    if not (build / "INSTALLATION_COMPLETE").is_file():
+        return None
+    for name in _SHELL_NAMES:
+        for exe in sorted(build.glob(f"*/{name}")):
+            if exe.is_file():
+                return exe
+    return None
+
+
+def _chrome_paths(platform: str | None = None, environ=None) -> list[str]:
+    """Where Playwright's ``chrome`` channel looks for Google Chrome."""
+    platform = platform or sys.platform
+    environ = os.environ if environ is None else environ
+    if platform == "darwin":
+        return ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    if platform == "win32":
+        import ntpath
+
+        prefixes = [environ.get(k) for k in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)")]
+        drive = environ.get("HOMEDRIVE")
+        if drive:
+            prefixes += [drive + "\\Program Files", drive + "\\Program Files (x86)"]
+        return [
+            ntpath.join(p, "Google", "Chrome", "Application", "chrome.exe") for p in prefixes if p
+        ]
+    return ["/opt/google/chrome/chrome"]
+
+
+def chrome_installed() -> bool:
+    """True when Google Chrome is where Playwright's ``chrome`` channel looks."""
+    return any(os.path.isfile(p) for p in _chrome_paths())
+
+
+def install_chromium() -> Path:
+    """Download Playwright's headless shell into :func:`browsers_dir` unless it
+    is there, and return its executable. One download at a time in this
+    process; Playwright locks the directory against other processes.
+
+    Only the shell (``playwright install --only-shell chromium``): about 100 MB
+    on macOS and 120 MB on Linux and Windows to download, where Playwright's
+    full Chromium and the shell were 300 MB. Nothing goes to the terminal: the
+    download is logged to ``world_engine_client.render``, Playwright's own
+    output at DEBUG."""
     with _install_lock:
-        if _installed:
-            return
-        print(
-            "world-engine-client: downloading Chromium for camera rendering "
-            "(a download of about 300 MB, only once) ...",
-            file=sys.stderr,
-            flush=True,
+        root = browsers_dir()
+        found = shell_executable(root)
+        if found is not None:
+            return found
+        fixes = [
+            _SHELL_FIX,
+            "behind a proxy or a firewall: set HTTPS_PROXY, or PLAYWRIGHT_DOWNLOAD_HOST to a "
+            "mirror of Playwright's downloads",
+            "or pass images=False for a state-only session",
+        ]
+        log.info(
+            "downloading the headless browser for camera images (Chrome Headless Shell, about "
+            "100-120 MB, once) into %s",
+            root,
         )
-        done = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
-        if done.returncode != 0:
-            raise RendererError(
-                "downloading Chromium failed",
-                code="renderer_unavailable",
-                fixes=["python -m playwright install chromium", _SYSTEM_DEPS_FIX],
+        started = time.monotonic()
+        # Only the download is told where: this process's environment stays
+        # as it is, and so do Playwright's lookups in it.
+        env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(root)}
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            done = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # Windows: no console
             )
-        _installed = True
+        except OSError as exc:
+            raise RendererError(
+                f"downloading the headless browser into {root} failed: {exc}",
+                code="renderer_unavailable",
+                fixes=fixes,
+            ) from exc
+        output = (done.stdout or b"").decode("utf-8", "replace")
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        for line in lines:
+            log.debug("playwright install: %s", line)
+        found = shell_executable(root)
+        if done.returncode != 0 or found is None:
+            tail = " | ".join(lines[-4:])[-600:] or "no output"
+            raise RendererError(
+                f"downloading the headless browser into {root} failed (exit code "
+                f"{done.returncode}): {tail}",
+                code="renderer_unavailable",
+                fixes=fixes,
+            )
+        log.info("headless browser ready after %.0f s: %s", time.monotonic() - started, found)
+        return found
+
+
+def prepare_browser(*, force: bool = False) -> bool:
+    """Start downloading the headless shell in the background when the browser
+    path will need it: there is no shell in :func:`browsers_dir` yet and,
+    unless ``force``, no installed Google Chrome to launch first
+    (WE_RENDER_BROWSER=chrome: never). True when a download runs. A renderer
+    calls this before it fetches the scene, so the two downloads overlap, and
+    waits for the shell only when it launches it."""
+    choice = browser_choice()
+    if choice == "chrome" or shell_executable() is not None:
+        return False
+    if not force and choice == "auto" and chrome_installed():
+        return False
+    with _download_lock:
+        thread = _download["thread"]
+        if thread is not None and thread.is_alive():
+            return True
+        _download["error"] = None
+        thread = threading.Thread(
+            target=_download_shell, name="world-engine-client headless browser", daemon=True
+        )
+        _download["thread"] = thread
+        thread.start()
+    return True
+
+
+def _download_shell() -> None:
+    try:
+        install_chromium()
+    except BaseException as exc:  # noqa: BLE001 - kept for whoever waits for it
+        _download["error"] = exc
+
+
+def _wait_for_shell(*, start: bool = True) -> Path:
+    """The headless shell: there already, or once the background download has
+    finished; ``start`` starts one when none runs (else the last one's result
+    stands). Raises what the download raised."""
+    found = shell_executable()
+    if found is not None:
+        return found
+    if start:
+        prepare_browser(force=True)
+    with _download_lock:
+        thread = _download["thread"]
+    if thread is not None:
+        thread.join()
+    found = shell_executable()
+    if found is not None:
+        return found
+    error = _download["error"]
+    if isinstance(error, RendererError):
+        raise RendererError(error.reason, code=error.code, fixes=error.fixes)
+    raise RendererError(
+        f"downloading the headless browser into {browsers_dir()} failed: "
+        + (str(error) if error is not None else "no browser after the download"),
+        code="renderer_unavailable",
+        fixes=[_SHELL_FIX, "or pass images=False for a state-only session"],
+    )
 
 
 _RENDER_MODULES = ("playwright", "websockets", "PIL")
@@ -231,6 +433,10 @@ def candidate_args(chrome_args=None, allow_software=True) -> list[list[str]]:
 Fetch = Callable[[str], "io.BufferedIOBase"]
 
 
+class _NoBrowser(RendererError):
+    """Neither an installed Google Chrome nor the headless shell launches."""
+
+
 class LocalRenderer:
     """Headless Chrome running the capture page; ``render(state)`` -> images.
 
@@ -243,11 +449,16 @@ class LocalRenderer:
     verified before Chrome starts. ``scene_name`` is the name the cache lists
     the scene under.
 
+    The browser: an installed Google Chrome, else this package's headless
+    shell (see :func:`browser_choice`). When neither is there, the shell's
+    download starts in the background before the scene's (``auto_install``,
+    default WE_RENDER_AUTO_INSTALL; :func:`prepare_browser`).
+
     Without hardware WebGL the page renders in software after a
     RuntimeWarning; ``allow_software=False`` makes that an error. ``timeout``
     bounds loading the page, loading the scene and each frame. The start as a
     whole, over all Chrome flag sets, gets ``timeout`` + 30 s, and ``timeout``
-    more for a software first frame; downloading Chromium or the scene does
+    more for a software first frame; downloading the browser or the scene does
     not count."""
 
     def __init__(
@@ -298,7 +509,13 @@ class LocalRenderer:
         self._allow_software = allow_software
         self._candidates = candidate_args(chrome_args, allow_software)
         self._auto_install = _auto_install_enabled(auto_install)
+        self._browser_choice = browser_choice()
         self.chrome_args: list[str] | None = None  # the set that worked
+        # The browser that rendered: "chrome" or "headless-shell", its version.
+        self.browser: str | None = None
+        self.browser_version: str | None = None
+        self._shell_failure: RendererError | None = None  # its download failed
+        self._downloading = False  # this start began the shell's download
         self._timeout = timeout
         self.gpu = "(unknown)"
         self.software = False
@@ -317,6 +534,10 @@ class LocalRenderer:
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
         try:
+            if self._auto_install:
+                # No browser to launch yet: the shell downloads while the
+                # scene does.
+                self._downloading = prepare_browser()
             self.assets = SceneAssets(
                 fetch,
                 self._digests,
@@ -353,7 +574,13 @@ class LocalRenderer:
     @property
     def info(self) -> dict:
         """What renders this session's images, for ``info["render"]``."""
-        return {"renderer": "chrome", "adapter": self.gpu, "software": self.software}
+        return {
+            "renderer": "chrome",
+            "adapter": self.gpu,
+            "software": self.software,
+            "browser": self.browser,
+            "browser_version": self.browser_version,
+        }
 
     def render(self, state: dict) -> dict[str, np.ndarray]:
         """Pose the scene as ``state`` (a ``render_state`` from the server) and
@@ -503,6 +730,8 @@ class LocalRenderer:
                 await self._attempt(args, accept_software=self._allow_software and last)
                 self.chrome_args = args
                 return
+            except _NoBrowser:
+                raise  # no browser at all: no flag set does better
             except RendererError as exc:
                 failures.append((exc, args))
                 self._failures.append(self._redact(f"{' '.join(args)} -> {exc}"))
@@ -642,44 +871,85 @@ class LocalRenderer:
         self._pending.clear()
 
     async def _launch(self, args: list[str]):
-        errors = []
-        for channel in ("chrome", None):  # an installed Chrome, else Playwright's
+        """Launch a browser with ``args``: an installed Google Chrome, else this
+        package's headless shell, downloaded first when it is missing (that
+        does not count against the start). WE_RENDER_BROWSER picks one of the
+        two. When neither is there, or Chromium's system libraries are
+        missing, raises _NoBrowser: the same for every flag set. A browser that
+        is there and fails with these flags raises RendererError: the next
+        flag set may do better."""
+        errors: list[str] = []
+        off = False  # no shell, and the automatic download is off
+        these_flags = False  # a browser that is there failed to start with ``args``
+        if self._browser_choice in ("auto", "chrome"):
             try:
-                return await self._open(channel, args)
-            except Exception as exc:  # noqa: BLE001 - try the next browser
+                return self._launched("chrome", await self._open("chrome", args))
+            except Exception as exc:  # noqa: BLE001 - try the shell
                 errors.append(str(exc))
-        if self._auto_install and _browser_missing(errors[-1]):
-            # A download is slow, not stuck: it does not count against the start.
-            deadline, self._deadline = self._deadline, float("inf")
-            downloading = time.monotonic()
-            try:
-                await asyncio.to_thread(install_chromium)
-            finally:
-                self._deadline = deadline + time.monotonic() - downloading
-            try:
-                return await self._open(None, args)
-            except Exception as exc:  # noqa: BLE001 - reported below
-                errors.append(str(exc))
-        if _system_deps_missing(errors[-1]):
+                these_flags = not _browser_missing(str(exc))
+        if self._browser_choice in ("auto", "shell"):
+            exe = shell_executable()
+            if exe is None and self._auto_install and self._shell_failure is None:
+                # A download is slow, not stuck: it does not count against the start.
+                deadline, self._deadline = self._deadline, float("inf")
+                waiting = time.monotonic()
+                try:
+                    # One download per start: the one begun above, or one now.
+                    exe = await asyncio.to_thread(_wait_for_shell, start=not self._downloading)
+                except RendererError as exc:
+                    self._shell_failure = exc
+                finally:
+                    self._deadline = deadline + time.monotonic() - waiting
+            if self._shell_failure is not None:
+                errors.append(self._shell_failure.reason)
+            elif exe is None:
+                off = True
+                errors.append(f"no headless browser in {browsers_dir()}")
+            else:
+                try:
+                    return self._launched("headless-shell", await self._open(None, args, exe))
+                except Exception as exc:  # noqa: BLE001 - reported below
+                    errors.append(str(exc))
+                    these_flags = True
+        last = errors[-1] if errors else ""
+        if self._shell_failure is not None:
+            fixes = list(self._shell_failure.fixes)
+        elif _system_deps_missing(last):
             fixes = [_SYSTEM_DEPS_FIX]
-        elif _browser_missing(errors[-1]):
-            # Only reached with the automatic download turned off.
+        elif off:
             fixes = [
-                "python -m playwright install chromium (automatic download is off)",
+                _SHELL_FIX.replace("(", "(the automatic download is off; ", 1),
+                "or pass images=False for a state-only session",
+            ]
+        elif self._browser_choice == "chrome":
+            fixes = [
+                "install Google Chrome, or unset WE_RENDER_BROWSER for the headless shell",
                 "or pass images=False for a state-only session",
             ]
         else:
             fixes = list(_INSTALL_FIXES)
-        raise RendererError(
+        none = _NoBrowser if not these_flags or _system_deps_missing(last) else RendererError
+        raise none(
             "no Chrome or Chromium to render with: "
-            + " | ".join(e.splitlines()[0] for e in errors),
+            + " | ".join(e.splitlines()[0] for e in errors if e),
             code="renderer_unavailable",
             fixes=fixes,
         )
 
-    async def _open(self, channel: str | None, args: list[str]):
+    def _launched(self, name: str, browser):
+        """Note which browser runs, and its version, for info["render"]."""
+        self.browser = name
+        try:
+            version = getattr(browser, "version", None)
+        except Exception:  # noqa: BLE001 - a browser that went away already
+            version = None
+        self.browser_version = version if isinstance(version, str) else None
+        return browser
+
+    async def _open(self, channel: str | None, args: list[str], executable: Path | None = None):
         return await self._pw.chromium.launch(
             channel=channel,
+            executable_path=str(executable) if executable is not None else None,
             headless=True,
             args=args,
             ignore_default_args=["--disable-gpu", "--headless"],
@@ -813,3 +1083,48 @@ class _ProxyServer:
     def stop(self) -> None:
         self._httpd.shutdown()
         self._httpd.server_close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m world_engine_client.render install`` downloads the browser
+    path's headless browser now, into :func:`browsers_dir`; ``where`` says
+    where it is kept and what is there."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m world_engine_client.render",
+        description="The headless browser of the browser path (Chrome Headless Shell).",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("install", help="download it now, once (about 100-120 MB)")
+    sub.add_parser("where", help="print its directory, the shell there, and whether Chrome is")
+    args = parser.parse_args(argv)
+    if args.cmd == "where":
+        found = shell_executable()
+        where = {
+            "dir": str(browsers_dir()),
+            "shell": str(found) if found else None,
+            "chrome": chrome_installed(),
+        }
+        print(json.dumps(where, indent=2))
+        return 0
+    # Asked for on a terminal: the download says what it does there.
+    shown = logging.StreamHandler(sys.stderr)
+    shown.setFormatter(logging.Formatter("%(message)s"))
+    level = log.level
+    log.addHandler(shown)
+    log.setLevel(logging.INFO)
+    try:
+        found = install_chromium()
+    except RendererError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        log.removeHandler(shown)
+        log.setLevel(level)
+    print(found)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

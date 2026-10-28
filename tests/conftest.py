@@ -133,10 +133,22 @@ def private_cache(tmp_path, monkeypatch):
     root = tmp_path / "user-cache"
     # Playwright finds its browsers under the user cache directory too: keep
     # them where they are.
+    xdg = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-        xdg = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
         if sys.platform.startswith("linux"):
             monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(Path(xdg) / "ms-playwright"))
+    # So is this package's headless browser (render.browsers_dir): a test that
+    # launches one uses the user's. None downloads one unless it says so.
+    if not os.environ.get("DIGIARENA_BROWSERS_DIR"):
+        if sys.platform == "darwin":
+            user_cache = Path.home() / "Library" / "Caches"
+        elif os.name == "nt":
+            user_cache = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        else:
+            user_cache = Path(xdg)
+        monkeypatch.setenv("DIGIARENA_BROWSERS_DIR", str(user_cache / "digiarena" / "browsers"))
+    if os.environ.get("WE_RENDER_AUTO_INSTALL") is None:
+        monkeypatch.setenv("WE_RENDER_AUTO_INSTALL", "0")
     monkeypatch.setenv("XDG_CACHE_HOME", str(root))
     if sys.platform.startswith("linux"):
         monkeypatch.delenv("DIGIARENA_CACHE_DIR", raising=False)

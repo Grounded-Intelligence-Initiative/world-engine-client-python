@@ -432,7 +432,8 @@ class RemoteEnv:
                     code="renderer_unavailable",
                     fixes=fixes
                     + [
-                        "pip install playwright websockets (the browser path)",
+                        "pip install 'world-engine-client[render]' (the browser path: the "
+                        "pinned playwright, and websockets)",
                         "or pass images=False for a state-only session",
                     ],
                 )
