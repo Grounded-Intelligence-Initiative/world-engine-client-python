@@ -120,6 +120,12 @@
   `capture_page/MANIFEST.json`. It runs the client of its own checkout,
   judges the speed only where both paths ran on the same GPU, and calls a
   result `PASS` only when every run worked. See its README.
+- In a scene with several robots, `action_space` keeps every robot's gripper
+  dim within ±1, by the server's rule: the mode's `gripper_indices`, else its
+  `gripper_index`, else the last dim. 0.4.2 to 0.6.0 bounded only the last
+  dim, so in `osc_pose_abs` a sampled action could fail the server's check
+  and Gymnasium's `check_env` failed. The spaces of a scene with one robot do
+  not change.
 
 ## 0.6.0
 

@@ -411,7 +411,11 @@ pip install -e '.[img,gym,render]' pytest && python -m pytest
 `tests/` covers the client alone against a stub server: binary decoding, the
 never-retry / recovery rules, heartbeats and Gymnasium spaces. The wire-contract
 tests (real client against a real server) live in the server repo:
-`tests/test_remote_*.py` and `tests/test_teleop_channel.py`.
+`tests/test_remote_*.py` and `tests/test_teleop_channel.py`. One lives here:
+`tests/test_engine_spaces.py` checks the action spaces and Gymnasium's
+`check_env` in scenes with several robots, served from an engine checkout
+(`WE_TEST_ENGINE`) by its Python (`WE_TEST_ENGINE_PYTHON`); without one it is
+skipped.
 `tests/test_render_chrome.py` renders a small page in a real headless Chrome on
 SwiftShader. It is skipped without the `render` extra or a browser;
 `WE_TEST_REQUIRE_CHROME=1` makes it fail instead. The tests use the headless
