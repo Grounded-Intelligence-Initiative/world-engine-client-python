@@ -1,13 +1,17 @@
 """Make the bench's reference images; they were made on an RTX 4090 and are
 committed in refs/. Run again only to replace them, on an RTX 4090:
 
-    python bench/igpu/make_refs.py --capture-page DIR|ZIP [--force]
+    python bench/igpu/make_refs.py --capture-page DIR|ZIP [--sets d] [--force]
 
 For each scene: renderer D with its default colour target (rgba16float on a
 GPU), and Spark through the capture page (page.py: the engine's build, from
 outside this repository) with its JPEG encoding replaced by PNG (the same
 pixels as a readback). Each is rendered twice, in two renderers, and must come
-out the same both times. refs/refs.json records what made them.
+out the same both times. refs/refs.json records what made them, and
+``made_with`` the client: its version, the checkout's git description and
+the digest of renderer D's files (client.py), which a test checks against
+this checkout. After renderer D changes, ``--sets d`` makes D's images again
+and keeps Spark's.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import client  # noqa: E402
 import compare  # noqa: E402
 import machine  # noqa: E402
 import page  # noqa: E402
@@ -42,11 +47,20 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--force", action="store_true", help="on another GPU than an RTX 4090")
     ap.add_argument("--capture-page", default=None, metavar="DIR|ZIP", help="as run.py's (page.py)")
+    ap.add_argument(
+        "--sets",
+        choices=("all", "d"),
+        default="all",
+        help="d: renderer D's images only, Spark's kept (after renderer D changed)",
+    )
     a = ap.parse_args()
-    where = page.locate(a.capture_page)
-    if where is None:
+    where = page.locate(a.capture_page) if a.sets == "all" else None
+    if where is None and a.sets == "all":
         ap.error(page.missing())
     os.environ["WE_RENDER_BROWSER"] = "shell"  # the pinned headless shell, not a local Chrome
+    found = client.info()
+    if found["matches_checkout"] is False:
+        ap.error(f"the installed world-engine-client is not this checkout's: {found['differs']}")
     work = Path(tempfile.mkdtemp(prefix="igpu-refs-"))
     try:
         return make(a, where, work)
@@ -54,19 +68,34 @@ def main() -> int:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def make(a, where: Path, work: Path) -> int:
-    page_dir, _ = page.load(where, work / "capture_page")
+def make(a, where: Path | None, work: Path) -> int:
     cache_dir = str(work / "render-cache")
-    sets = {
-        "d_rgba16float_rtx4090": {"path": "d", "label": "renderer D", "adapter": "auto"},
-        "spark_rtx4090": {
+    sets = {"d_rgba16float_rtx4090": {"path": "d", "label": "renderer D", "adapter": "auto"}}
+    kept = json.loads((worker.REFS / "refs.json").read_text())
+    if where is not None:
+        page_dir, _ = page.load(where, work / "capture_page")
+        sets["spark_rtx4090"] = {
             "path": "chrome",
             "label": "Spark, PNG",
             "lossless": True,
             "capture_page": str(page_dir),
+        }
+    found_client = client.info()
+    record: dict = {
+        "made": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "images": worker.REF_IMAGES,
+        "made_with": {
+            "world-engine-client": found_client["installed"]["version"],
+            "git": (found_client["checkout"] or {}).get("git"),
+            "renderer_d": found_client["renderer_d"],
+            "matches_checkout": found_client["matches_checkout"],
         },
     }
-    record: dict = {"made": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "images": worker.REF_IMAGES}
+    if where is None:
+        record["made_with"]["spark_kept_from"] = kept.get("made")
+        record["sets"] = {
+            name: {"spark_rtx4090": kept["sets"][name]["spark_rtx4090"]} for name in worker.SCENES
+        }
     found = machine.collect()  # what made them, without paths or the host's name
     record["machine"] = {
         "os": {k: found["os"].get(k) for k in ("system", "release", "distribution", "machine")},

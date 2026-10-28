@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,7 @@ if not BENCH.is_dir():  # an sdist: the bench is the repository's only
     pytest.skip("bench/igpu is not here", allow_module_level=True)
 sys.path.insert(0, str(BENCH))
 
+import client  # noqa: E402
 import compare  # noqa: E402
 import pack_capture_page  # noqa: E402
 import page  # noqa: E402
@@ -220,6 +222,44 @@ def test_the_references_are_there():
             assert "RTX 4090" in entry["adapter"]["adapter"]
             for k, img in worker.refs(name)[_key(folder)].items():
                 assert compare.digest(img) == entry["images"][k]
+
+
+def test_the_references_were_made_with_this_checkouts_renderer_d():
+    """refs/refs.json names the renderer D that drew refs/ (made_with); a
+    change to renderer D's files needs refs/ made again (or found the same)."""
+    made = json.loads((worker.REFS / "refs.json").read_text())["made_with"]
+    here = client.renderer_d_digest(client.package_files(client.CHECKOUT_SRC))
+    assert made["renderer_d"] == here, (
+        "renderer D's files changed since refs/ was made: run bench/igpu/make_refs.py on an "
+        "RTX 4090 (--sets d when only renderer D changed) and commit refs/"
+    )
+
+
+def test_the_installed_client_is_compared_with_the_checkout_file_by_file(tmp_path):
+    import world_engine_client
+
+    installed = Path(world_engine_client.__file__).resolve().parent
+    checkout = tmp_path / "src" / "world_engine_client"
+    shutil.copytree(installed, checkout, ignore=shutil.ignore_patterns("__pycache__"))
+    (tmp_path / "pyproject.toml").write_text('version = "9.9.9"\n')
+    made = {"renderer_d": client.renderer_d_digest(client.package_files(installed))}
+    same = client.info(made, checkout_src=checkout)
+    assert same["matches_checkout"] is True and same["differs"] == []
+    assert same["refs_made_with_this_renderer_d"] is True
+    assert same["checkout"]["version"] == "9.9.9"
+    (checkout / "wgsl" / "splat.wgsl").write_text("// another renderer D")
+    other = client.info(made, checkout_src=checkout)
+    assert other["matches_checkout"] is False and other["differs"] == ["wgsl/splat.wgsl"]
+    lines = " ".join(client.describe(other))
+    assert "WARNING" in lines and "pip install '.[render]'" in lines
+    assert f"git checkout v{world_engine_client.__version__}" in lines
+    assert (
+        client.info({"renderer_d": "0" * 64}, checkout)["refs_made_with_this_renderer_d"] is False
+    )
+    assert "another renderer D" in " ".join(
+        client.describe(client.info({"renderer_d": "0" * 64}, checkout))
+    )
+    assert client.info(None, checkout_src=tmp_path / "nowhere")["matches_checkout"] is None
 
 
 def _key(folder: str) -> str:
@@ -466,6 +506,14 @@ def test_a_failed_check_fails_even_when_runs_are_missing():
     runs = [_record("d", 1, INTEL_D, 40.0, 2.0, 1.8), _failed("chrome", 1)]
     s = run.summarize(runs)
     assert s["checks"][0]["pass"] is False and s["pass"] is False and s["verdict"] == "FAIL"
+
+
+def test_a_client_that_is_not_the_checkouts_leaves_the_result_incomplete():
+    runs = _rounds("d", INTEL_D, 40.0) + _rounds("chrome", INTEL_CHROME, 10.0)
+    assert run.summarize(runs, client={"matches_checkout": True})["pass"] is True
+    s = run.summarize(runs, client={"matches_checkout": False, "differs": ["render_wgsl.py"]})
+    assert s["pass"] is None and s["client_matches_checkout"] is False
+    assert "render_wgsl.py" in " ".join(s["incomplete_because"])
 
 
 @pytest.mark.parametrize(

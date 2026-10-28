@@ -76,18 +76,26 @@ makes the zip from an engine checkout built at that commit
 
 ## Install and run
 
-Python 3.11 or later, and world-engine-client 0.7.0 or later, the first
-release with the browser path this bench expects, with its `render` extra
-(wgpu, Pillow, cryptography, the pinned playwright, websockets, and on Linux
-world-engine-swiftshader):
+Python 3.11 or later. The bench runs the world-engine-client of this
+checkout: `refs/` goes with that client's renderer D, and at the start the
+bench compares the installed package with `src/world_engine_client` here,
+file by file. So install the client from the checkout, with its `render`
+extra (wgpu, Pillow, cryptography, the pinned playwright, websockets, and on
+Linux world-engine-swiftshader from PyPI):
 
 ```bash
-python -m venv bench-venv && . bench-venv/bin/activate   # Windows: bench-venv\Scripts\activate
-pip install 'world-engine-client[render]'
 git clone https://github.com/Grounded-Intelligence-Initiative/world-engine-client-python
 cd world-engine-client-python
+python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install '.[render]'                         # Windows cmd: pip install .[render]
 python bench/igpu/run.py --capture-page ~/Downloads/igpu-capture-page-1af5543.zip --label "M4 Pro, on power"
 ```
+
+A release from PyPI does as well with the checkout of its tag (`git checkout
+v0.7.0` for `pip install 'world-engine-client[render]==0.7.0'`). When the
+installed package is not this checkout's, the bench prints which files
+differ and marks the result incomplete. It needs world-engine-client 0.7.0 or
+later, the first with the pinned headless shell.
 
 On Linux the headless shell may need Chromium's system libraries once:
 `python -m playwright install-deps chromium` (needs sudo).
@@ -176,7 +184,10 @@ One JSON object:
   `python`, `packages` (world-engine-client, wgpu, playwright and the rest),
   `browsers` (where the headless shell is), `environment` (the variables
   that pick a GPU).
-- `config`, `capture_page` (its manifest), `started`, `finished`.
+- `config`, `capture_page` (its manifest and where it came from), `client`
+  (the installed world-engine-client, this checkout's version and `git
+  describe`, `matches_checkout` with the files that differ, and whether
+  `refs/` was made with this renderer D), `started`, `finished`.
 - `runs`: one per run: `key`, `round`, `adapter` (renderer D: name, type,
   backend, the search step, colour target and the search's trail; Chrome:
   the WebGL renderer string, the browser and its version, the flags),
@@ -232,7 +243,10 @@ of 10.7, 34.7 and 10.1.
   (on an RTX 4090 only).
 - `trace/`: `scene_init.json`, `states.jsonl`, `meta.json`.
 - `refs/<scene>/{d_rgba16float_rtx4090,spark_rtx4090}/`: the reference
-  images; `refs/refs.json` says what made them.
+  images; `refs/refs.json` says what made them, and `made_with` the client
+  (its version, `git describe`, and a digest of renderer D's files, which a
+  test holds to this checkout: after renderer D changes, `make_refs.py --sets
+  d` on an RTX 4090 makes D's images again). `client.py` compares.
 - `capture_page/`: `MANIFEST.json` (the build's files and their SHA-256) and
   `LICENSES.md` (the notices of the libraries the build bundles; the zip
   carries both).

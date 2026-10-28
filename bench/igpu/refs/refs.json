@@ -22,6 +22,13 @@
    "wrist"
   ]
  ],
+ "made_with": {
+  "world-engine-client": "0.6.0",
+  "git": null,
+  "renderer_d": "95a26509775791b1e1526c3f2df201c3ff095f70d4b6bd579085f26a8c2c4b7f",
+  "matches_checkout": null,
+  "note": "written after the images were made (2026-10-28T10:04) by the renderer D of world-engine-client 562163a; render_wgsl.py, assets.py and wgsl/ were the same at the commit that adds this note"
+ },
  "machine": {
   "os": {
    "system": "Linux",

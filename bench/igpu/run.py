@@ -32,6 +32,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import client  # noqa: E402
 import machine  # noqa: E402
 import page  # noqa: E402
 
@@ -241,13 +242,17 @@ def stats(values: list[float]) -> dict:
     }
 
 
-def summarize(runs: list[dict], planned: list[tuple[str, int]] | None = None) -> dict:
+def summarize(
+    runs: list[dict], planned: list[tuple[str, int]] | None = None, client: dict | None = None
+) -> dict:
     """The numbers per path, the checks of README.md and the verdict.
 
     ``planned``: the (key, round) of every run the bench meant to do (default:
-    those in ``runs``). ``pass`` is True only when every planned run worked
-    and every check was judged and passed; False when a check failed; None
-    otherwise (``complete`` False, ``incomplete_because`` says why)."""
+    those in ``runs``). ``client``: client.info(), whose installed package
+    must be this checkout's (refs/ goes with it). ``pass`` is True only when
+    every planned run worked, every check was judged and passed and the client
+    is this checkout's; False when a check failed; None otherwise (``complete``
+    False, ``incomplete_because`` says why)."""
     by_key: dict[str, list[dict]] = {}
     for r in runs:
         by_key.setdefault(r["key"], []).append(r)
@@ -287,8 +292,14 @@ def summarize(runs: list[dict], planned: list[tuple[str, int]] | None = None) ->
     planned = sorted(done) if planned is None else list(planned)
     out["failed_runs"] = [f"{r['key']} round {r.get('round')}" for r in runs if not r.get("ok")]
     out["missing_runs"] = [f"{k} round {n}" for k, n in planned if (k, n) not in done]
+    out["client_matches_checkout"] = (client or {}).get("matches_checkout")
     out["checks"] = checks(out)
     why = []
+    if out["client_matches_checkout"] is False:
+        why.append(
+            "the installed world-engine-client is not this checkout's, which refs/ goes with: "
+            + ", ".join((client or {}).get("differs", [])[:4])
+        )
     if out["failed_runs"]:
         why.append(f"{len(out['failed_runs'])} run(s) failed: {', '.join(out['failed_runs'])}")
     if out["missing_runs"]:
@@ -492,6 +503,10 @@ def main(argv: list[str] | None = None) -> int:
     adapter = a.adapter or os.environ.get("WE_RENDER_ADAPTER") or "auto"
     d_env = dict(kv.split("=", 1) for kv in a.d_env)
     chrome_args = shlex.split(a.chrome_args) if a.chrome_args else None
+    refs = json.loads((HERE / "refs" / "refs.json").read_text())
+    found = client.info(refs.get("made_with"))
+    for line in client.describe(found):
+        print(f"[bench] {line}", flush=True)
     # The render cache (the scenes' assets, the page's files) and the page
     # taken from a zip: one temporary directory, removed at the end.
     work = Path(tempfile.mkdtemp(prefix="igpu-bench-"))
@@ -522,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
                 "thresholds": THRESHOLDS,
             },
             "capture_page": page_record,
+            "client": found,
             "machine": machine.collect(),
             "runs": [],
         }
@@ -575,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             launch("chrome_png", spec, 0, 0)
 
-        result["summary"] = summary = summarize(result["runs"], planned)
+        result["summary"] = summary = summarize(result["runs"], planned, found)
         result["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         out.write_text(json.dumps(result, indent=1, default=str))
         print(f"[bench] wrote {out}", flush=True)
