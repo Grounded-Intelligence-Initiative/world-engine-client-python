@@ -336,6 +336,7 @@ def test_a_local_session_needs_no_cryptography(stub, sim, monkeypatch):
     from world_engine_client import render
 
     monkeypatch.setattr(render, "available", lambda: False)  # no cryptography
+    monkeypatch.setattr(render, "crypto_available", lambda: False)
     monkeypatch.setattr(render, "_available_plain", lambda: True)
     Platform(stub, encrypted=False)
     received = session(stub, sim, platform=False)

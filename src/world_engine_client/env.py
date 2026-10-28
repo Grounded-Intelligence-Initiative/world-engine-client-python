@@ -25,12 +25,14 @@ import select
 import threading
 import time
 import urllib.parse
+import warnings
 
 import numpy as np
 
 from .errors import (
     ProtocolError,
     RecoveryRequiredError,
+    RendererError,
     RenderFetchError,
     WorldEngineClientError,
     raise_for,
@@ -71,14 +73,21 @@ def connect(
     ``env.metadata['supported_control_modes']`` for what the server offers).
 
     Camera images (``images=True`` or ``cameras=[...]``) are rendered on this
-    machine in headless Chrome; the server only simulates. That needs the
-    ``render`` extra. Without a hardware GPU they are rendered in software,
-    with a RuntimeWarning. ``render`` accepts ``"auto"`` or ``"local"`` (the
-    same thing; kept for callers that pass it). ``render_options`` go to
-    :class:`world_engine_client.render.LocalRenderer` (``cache_dir``,
-    ``scene_name``, ``allow_software`` (default True; False refuses software
-    rendering), ``chrome_args``, ``auto_install``, ``timeout``). Scene assets
-    are kept in the render cache (:mod:`world_engine_client.cache`): the
+    machine; the server only simulates. That needs the ``render`` extra. A
+    server with renderer D (render protocol 2) has them drawn by
+    :class:`world_engine_client.render_wgsl.WGSLRenderer` (wgpu, no browser); an
+    older one by headless Chrome (:class:`world_engine_client.render.LocalRenderer`),
+    and so does a machine where no GPU or software adapter renders for D but
+    Chrome does. Without a hardware GPU they are rendered in software, with a
+    RuntimeWarning. ``render`` accepts ``"auto"`` or ``"local"`` (the same
+    thing; kept for callers that pass it). ``render_options``: ``renderer``
+    (``"auto"``, ``"wgsl"`` or ``"chrome"``; the WE_RENDERER environment
+    variable sets the default), ``cache_dir``, ``scene_name``,
+    ``allow_software`` (default True; False refuses software rendering),
+    ``timeout``; for D ``adapter`` (``"auto"``, ``"low-power"``, ``"software"``
+    or ``"name:<part of the adapter name>"``; default WE_RENDER_ADAPTER) and
+    ``color_format``; for Chrome ``chrome_args`` and ``auto_install``. Scene
+    assets are kept in the render cache (:mod:`world_engine_client.cache`): the
     hosting platform's arrive encrypted and stay encrypted on disk.
 
     ``normalize_reward`` (default True) returns each reward as the server sends
@@ -151,6 +160,7 @@ class RemoteEnv:
         self.control_mode: str | None = None
         self._render_request = "server"
         self._render_options: dict = {}
+        self._render_split: tuple[dict, dict, str] = ({}, {}, "auto")
         self.renderer = None  # LocalRenderer when images are rendered on this machine
         # False: step() returns a staged reward in points (see connect).
         self.normalize_reward = True
@@ -317,16 +327,22 @@ class RemoteEnv:
         proto=_PROTO,
     ) -> None:
         local = bool(images or cameras)
-        dac1_ok = False
+        dac1_ok = d_ok = chrome_ok = False
         if local:
             from . import render as local_render
+            from . import render_wgsl
 
-            # The render extra includes cryptography for the platform's
-            # encrypted scene assets. A local world-engine serve sends its
-            # scene plain, so a session with it works without cryptography.
-            dac1_ok = local_render.available()
+            self._render_split = render_wgsl.env_options(self._render_options)
+            wants = self._render_split[2]
+            # Renderer D needs wgpu; the browser path Playwright and websockets.
+            # The render extra brings both, and cryptography for the platform's
+            # encrypted scene assets. A local world-engine serve sends its scene
+            # plain, so a session with it works without cryptography.
+            d_ok = wants != "chrome" and render_wgsl.available()
+            chrome_ok = wants != "wgsl" and local_render._available_plain()
+            dac1_ok = local_render.crypto_available() and (d_ok or chrome_ok)
             platform = self._access_provider is not None
-            if not dac1_ok and (platform or not local_render._available_plain()):
+            if not (d_ok or chrome_ok) or (platform and not dac1_ok):
                 raise local_render.RendererError(
                     "camera images are rendered on this machine and need the render extra",
                     code="renderer_unavailable",
@@ -351,6 +367,14 @@ class RemoteEnv:
             # sessions of clients that do not.
             if dac1_ok:
                 body["asset_encryption"] = ["dac1"]
+            # Render protocols: 1 is the browser path (the engine's capture
+            # page), 2 renderer D with a pipeline version this package ships.
+            # An engine answers 2 only when it supports one of the pipelines
+            # and can describe the scene in it; an older engine ignores these
+            # fields and answers 1 (design doc 16 §9.3).
+            body["render_protocols"] = [p for p, ok in ((1, chrome_ok), (2, d_ok)) if ok]
+            if d_ok:
+                body["pipelines"] = [render_wgsl.PIPELINE]
         reply = self._post("/control/connect", body, with_session=False)
         if reply.get("proto") != proto:
             raise ProtocolError("server did not honor the requested protocol")
@@ -361,10 +385,42 @@ class RemoteEnv:
             self._episode_id = reply.get("episode_id")
         self._refresh_env(reply.get("env"))
         bundle = reply.get("render") if local else None
-        if local and (not bundle or bundle.get("protocol") != 1):
-            raise ProtocolError(
-                "this server predates client rendering; upgrade it, or connect with images=False"
-            )
+        if local:
+            if not isinstance(bundle, dict) or not bundle:
+                raise ProtocolError(
+                    "this server predates client rendering; upgrade it, or connect with "
+                    "images=False"
+                )
+            protocol = bundle.get("protocol")
+            if protocol not in (1, 2) or (protocol == 2 and not d_ok):
+                raise ProtocolError(
+                    f"the server answered render protocol {protocol!r}, which this client did "
+                    "not offer",
+                    fixes=["pip install -U 'world-engine-client[render]'"],
+                )
+            pipeline = (bundle.get("pipeline") or {}).get("version")
+            if protocol == 2 and pipeline != render_wgsl.PIPELINE:
+                raise ProtocolError(
+                    f"the server chose pipeline {pipeline!r}; this client ships "
+                    f"{render_wgsl.PIPELINE}",
+                    fixes=["pip install -U 'world-engine-client[render]'"],
+                )
+            if protocol == 1 and not chrome_ok:
+                why = (
+                    "render_options asks for renderer 'wgsl'"
+                    if self._render_split[2] == "wgsl"
+                    else "the browser path needs Playwright and websockets"
+                )
+                raise local_render.RendererError(
+                    "this server offers only the browser path (render protocol 1, an engine "
+                    f"from before renderer D), and {why}",
+                    code="renderer_unavailable",
+                    fixes=[
+                        "upgrade the server to an engine with renderer D",
+                        "or pip install playwright websockets (the browser path)",
+                        "or pass images=False for a state-only session",
+                    ],
+                )
         if proto == 3:
             # Start before the renderer: its start can take longer than the
             # 90 s lease (a large scene rendered in software). connect() stops
@@ -372,19 +428,48 @@ class RemoteEnv:
             self._heartbeat_thread = threading.Thread(target=self._heartbeat, daemon=True)
             self._heartbeat_thread.start()
         if local:
-            from .render import LocalRenderer
+            self.renderer = self._start_renderer(bundle, chrome_ok)
 
-            parsed = urllib.parse.urlsplit(self._base)
-            self.renderer = LocalRenderer(
-                self._open_render,
-                bundle["scene_init"],
-                bundle["digests"],
-                bundle=bundle,
-                platform=self._access_provider is not None,
-                origin=f"{parsed.scheme}://{parsed.netloc}",
-                scene_id=self.metadata.get("scene_id"),
-                **self._render_options,
-            )
+    def _start_renderer(self, bundle: dict, chrome_ok: bool):
+        """Renderer D for protocol 2, the browser path for protocol 1; the
+        browser path also when D finds no adapter that renders and Chrome is
+        there (design doc 16 §9.9 runtime, step 5)."""
+        from .render import LocalRenderer
+        from .render_wgsl import NoRenderAdapter, WGSLRenderer
+
+        d_opts, chrome_opts, _ = self._render_split
+        parsed = urllib.parse.urlsplit(self._base)
+        common = {
+            "bundle": bundle,
+            "platform": self._access_provider is not None,
+            "origin": f"{parsed.scheme}://{parsed.netloc}",
+            "scene_id": self.metadata.get("scene_id"),
+        }
+        args = (self._open_render, bundle["scene_init"], bundle["digests"])
+        d_failure = None
+        if bundle.get("protocol") == 2:
+            try:
+                return WGSLRenderer(*args, **common, **d_opts)
+            except NoRenderAdapter as exc:
+                if not chrome_ok:
+                    raise
+                d_failure = exc
+                warnings.warn(
+                    "renderer D found no GPU or software adapter that renders here, so camera "
+                    f"images come from headless Chrome instead, which is slower ({exc.args[0]})",
+                    RuntimeWarning,
+                    stacklevel=4,
+                )
+        try:
+            return LocalRenderer(*args, **common, **chrome_opts)
+        except RendererError as exc:
+            if d_failure is None:
+                raise
+            raise NoRenderAdapter(
+                f"nothing renders camera images here: renderer D: {d_failure.args[0]} | "
+                f"headless Chrome: {exc.args[0]}",
+                code="renderer_unavailable",
+            ) from exc
 
     def _heartbeat(self):
         while not self._stop.wait(_HEARTBEAT_SECONDS):
@@ -485,6 +570,11 @@ class RemoteEnv:
             rendering = time.perf_counter()
             reply["obs"]["rgb"] = self.renderer.render(reply["render_state"])
             timings["render_ms"] = (time.perf_counter() - rendering) * 1000
+            # Which renderer and adapter drew the images (and, for a software
+            # adapter, why no GPU did).
+            render_info = getattr(self.renderer, "info", None)
+            if isinstance(render_info, dict):
+                reply["info"]["render"] = dict(render_info)
         timings["total_ms"] = (time.perf_counter() - started) * 1000
         self.last_timings = timings
         return reply

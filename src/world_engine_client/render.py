@@ -185,15 +185,27 @@ _RENDER_MODULES = ("playwright", "websockets", "PIL")
 def _modules_found(modules: tuple[str, ...]) -> bool:
     import importlib.util
 
-    return all(importlib.util.find_spec(m) is not None for m in modules)
+    for m in modules:
+        try:
+            if importlib.util.find_spec(m) is None:
+                return False
+        except ValueError:  # loaded already, without a spec (a stand-in module)
+            continue
+    return True
 
 
 def available() -> bool:
-    """True when the ``render`` extra is installed (Chrome is checked on start).
-    The extra includes cryptography, which the hosting platform's encrypted
-    scene assets need. A local ``world-engine serve`` sends its scene plain:
-    for that the rest is enough (:func:`_available_plain`)."""
+    """True when the browser path of the ``render`` extra is installed (Chrome
+    is checked on start). The extra includes cryptography, which the hosting
+    platform's encrypted scene assets need. A local ``world-engine serve``
+    sends its scene plain: for that the rest is enough (:func:`_available_plain`)."""
     return _modules_found(_RENDER_MODULES + ("cryptography",))
+
+
+def crypto_available() -> bool:
+    """True when cryptography is installed: this client then reads the hosting
+    platform's encrypted scene assets (DAC1), on either rendering path."""
+    return _modules_found(("cryptography",))
 
 
 def _available_plain() -> bool:
@@ -338,6 +350,11 @@ class LocalRenderer:
             raise
 
     # ----- public ------------------------------------------------------------- #
+    @property
+    def info(self) -> dict:
+        """What renders this session's images, for ``info["render"]``."""
+        return {"renderer": "chrome", "adapter": self.gpu, "software": self.software}
+
     def render(self, state: dict) -> dict[str, np.ndarray]:
         """Pose the scene as ``state`` (a ``render_state`` from the server) and
         return ``{camera name: (H, W, 3) uint8}``."""

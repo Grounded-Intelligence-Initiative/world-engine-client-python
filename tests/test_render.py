@@ -106,8 +106,11 @@ def test_images_are_rendered_locally(client_render):
 
 @pytest.mark.parametrize("kw", [{"images": True}, {"cameras": ["front"]}])
 def test_images_without_the_extra_fail_before_any_request(stub, monkeypatch, kw):
+    from world_engine_client import render_wgsl
+
     monkeypatch.setattr(render_module, "available", lambda: False)
     monkeypatch.setattr(render_module, "_available_plain", lambda: False)
+    monkeypatch.setattr(render_wgsl, "available", lambda: False)
     with pytest.raises(wec.RendererError, match=r"render\]"):
         wec.connect("secret", url=stub.url, **kw)
     assert stub.calls == []

@@ -2,6 +2,38 @@
 
 ## 0.6.0
 
+- Renderer D: camera images from a server with renderer D (render protocol 2)
+  are drawn by `world_engine_client.render_wgsl.WGSLRenderer`, a WGSL splat
+  renderer on wgpu, in this process and without a browser. Splats are sorted
+  on the GPU, every camera is drawn in one frame, and the images are read
+  straight into numpy, one `(H, W, 3) uint8` per camera at its own size. On an
+  RTX 4090 the room scene of design doc 16 (1.5M splats, three 256×256
+  cameras) renders in about 7 ms, against 60–140 ms on the browser path. The
+  shaders ship in the package (`world_engine_client.wgsl`); a server never
+  sends shader code.
+- Connect offers `render_protocols: [1, 2]` and `pipelines: ["wgsl/1"]`. A
+  server from before renderer D ignores them and answers protocol 1: the
+  browser path, as before. So does a newer server for a scene the pipeline
+  cannot draw.
+- No GPU is no error. The client looks for a GPU first and then for a
+  software adapter: on Linux the system's Vulkan, the bundled loader with the
+  system's drivers, Mesa's lavapipe, the bundled SwiftShader; on Windows WARP.
+  A software adapter renders with one `RuntimeWarning`, and rendering slower
+  than real time (29.4 steps/s) after a warm-up with another, which names the
+  adapter, its type and the rate. When nothing renders, the browser path is
+  tried, and then connect raises `RendererError` with the fixes.
+- The `render` extra now brings `wgpu==0.32.0` and, on Linux x86_64 and
+  aarch64, `world-engine-swiftshader` (a software Vulkan: SwiftShader and the
+  Khronos loader, 2 MB on x86_64, about 8 MB on aarch64). Renderer D adds
+  10.7 MB to an install that has numpy and Pillow on x86_64, 16.4 MB on
+  aarch64. Playwright and websockets stay in the extra for the browser path.
+- New `render_options`: `renderer` (`"auto"`, `"wgsl"`, `"chrome"`; default
+  `WE_RENDERER`), `adapter` (`"auto"`, `"low-power"`, `"software"`,
+  `"name:<part of the name>"`; default `WE_RENDER_ADAPTER`) and
+  `color_format`. `info["render"]` names the renderer and the adapter of each
+  step.
+- Renderer D decrypts the platform's assets into memory and uploads them to
+  the GPU; no plain copy is written.
 - Reads the DigiArena platform's encrypted scene assets (DAC1, AES-256-GCM).
   A connect with images now says `asset_encryption: ["dac1"]`. 0.5.0 and
   earlier get `client_upgrade_required` from the platform instead of images.

@@ -1,0 +1,67 @@
+{
+  "comment": "Copied by scripts/sync_wgsl.py from the engine repository; change these files there, not here.",
+  "pipeline": "wgsl/1",
+  "engine_commit": "94c18ce905e870181eb43456e00b49bb2c08b1d6",
+  "files": {
+    "README.md": {
+      "source": "frontend/src/render/wgsl/README.md",
+      "sha256": "a4dd363d92b1131b6e13950a9a621cf654a33373047424f0293df4a8ff4a5260"
+    },
+    "__init__.py": {
+      "source": "world_engine/renderer/wgsl/__init__.py",
+      "sha256": "c5bc4a8b4b0c6e1ff397b858da278a54f52b73987f9b23169d1cddc537f958d7"
+    },
+    "_probe.py": {
+      "source": "world_engine/renderer/wgsl/_probe.py",
+      "sha256": "5ea665cebe971f49d7b634a6a69774cd788f95124250e76913edeb8a020e17e6"
+    },
+    "adapters.py": {
+      "source": "world_engine/renderer/wgsl/adapters.py",
+      "sha256": "d59429d3e9494b07b8a704e263bab9f8aba332f6edc373df8720c8a7b1612cf9"
+    },
+    "budget.py": {
+      "source": "world_engine/renderer/wgsl/budget.py",
+      "sha256": "f961e269e85b67fb2c1586ed938268c30d879dc55ef42ebdfcc4c82e2cc5553c"
+    },
+    "common.wgsl": {
+      "source": "frontend/src/render/wgsl/common.wgsl",
+      "sha256": "e9885f970cb038b0bc94b945333968699fe3b974e6bf0e981ead2ad3be9e4903"
+    },
+    "mesh_flat.wgsl": {
+      "source": "frontend/src/render/wgsl/mesh_flat.wgsl",
+      "sha256": "885a84195a3404f22a3e686adf6d93dbed2f2bfe95265c228eafcd268cf692df"
+    },
+    "pipeline.json": {
+      "source": "frontend/src/render/wgsl/pipeline.json",
+      "sha256": "45486b37e0199da41206c2586de7ae2361eccaf6a0247dd615849739a6450957"
+    },
+    "preprocess.wgsl": {
+      "source": "frontend/src/render/wgsl/preprocess.wgsl",
+      "sha256": "2dbbdd1f9e6dfedaa9da9dfbc95e9c755987296b0d5d0cfe050c738782068644"
+    },
+    "render_wgsl.py": {
+      "source": "world_engine/renderer/wgsl/render_wgsl.py",
+      "sha256": "14417a3590961f8dcd6144fa64c3c2f1bc19e36b4e732047fd474c3edc177cc4"
+    },
+    "resolve.wgsl": {
+      "source": "frontend/src/render/wgsl/resolve.wgsl",
+      "sha256": "398064c223b93530d1556bf1928ddbd814b2ea73d6a94c56574ec567ecdda30c"
+    },
+    "scene.py": {
+      "source": "world_engine/renderer/wgsl/scene.py",
+      "sha256": "e54ebfd1daa4f4adf7c5b2089cdd999c86c14a0c4989d6c71cfcc8192fa5bc4e"
+    },
+    "sort.wgsl": {
+      "source": "frontend/src/render/wgsl/sort.wgsl",
+      "sha256": "eda70bf818910fed36bc414b623190add93dc4757e363de8bb7e8df68762e551"
+    },
+    "splat.wgsl": {
+      "source": "frontend/src/render/wgsl/splat.wgsl",
+      "sha256": "502672bd18df0af31d82ce36ee55562bbdd06b4198c645687cb7c147e08c0cbe"
+    },
+    "splat_data.py": {
+      "source": "world_engine/renderer/wgsl/splat_data.py",
+      "sha256": "05f7fefd8668f2248d03d6600c8938ef0fa30340cd95cce21b44e5152aea8dbf"
+    }
+  }
+}

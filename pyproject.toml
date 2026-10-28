@@ -27,10 +27,22 @@ dependencies = [
 [project.optional-dependencies]
 img = ["Pillow>=10"]
 gym = ["gymnasium>=1.0"]
-# Camera images, rendered on this machine in headless Chrome. Without an
-# installed Chrome, Playwright's Chromium downloads on first use. The hosting
-# platform sends scene assets encrypted (AES-256-GCM): cryptography reads them.
-render = ["Pillow>=10", "playwright>=1.40", "websockets>=12", "cryptography>=42"]
+# Camera images, rendered on this machine. Renderer D draws them with wgpu
+# (pinned: its API changes between minor releases) from the WGSL this package
+# ships; on Linux without a GPU or a system Vulkan it uses the bundled software
+# Vulkan of world-engine-swiftshader (wheels for x86_64 and aarch64 only, like
+# wgpu's own). Playwright and websockets keep the browser path, for servers
+# from before renderer D and as the last fallback (Chromium downloads on first
+# use). The hosting platform sends scene assets encrypted (AES-256-GCM):
+# cryptography reads them. Pillow decodes mesh textures.
+render = [
+    "wgpu==0.32.0",
+    "world-engine-swiftshader>=0.1,<0.2; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "cryptography>=42",
+    "Pillow>=10",
+    "playwright>=1.40",
+    "websockets>=12",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff", "Pillow>=10", "gymnasium>=1.0", "cryptography>=42"]
@@ -42,8 +54,15 @@ Repository = "https://github.com/Grounded-Intelligence-Initiative/world-engine-c
 [tool.hatch.build.targets.wheel]
 packages = ["src/world_engine_client"]
 
+[tool.hatch.build.targets.sdist]
+# world-engine-swiftshader is its own package (swiftshader/, publish-swiftshader.yml)
+exclude = ["swiftshader"]
+
 [tool.ruff]
 line-length = 100
+# A copy of the engine's renderer D (scripts/sync_wgsl.py): linted there, kept
+# byte for byte here.
+extend-exclude = ["src/world_engine_client/wgsl"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "W"]
