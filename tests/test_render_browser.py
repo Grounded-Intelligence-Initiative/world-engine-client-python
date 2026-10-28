@@ -29,10 +29,23 @@ REV = "4242"  # the headless shell build the stand-in playwright names
 NOT_FOUND = "Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome"
 
 
-def make_shell(root: Path, rev: str = REV) -> Path:
+# Playwright 1.60.0's registry (EXECUTABLE_PATHS["chromium-headless-shell"]): the
+# folder of the download and the executable in it, per host platform.
+SHELL_LAYOUTS = {
+    "linux-x64": ("chrome-headless-shell-linux64", "chrome-headless-shell"),
+    "linux-arm64": ("chrome-linux", "headless_shell"),
+    "mac-x64": ("chrome-headless-shell-mac-x64", "chrome-headless-shell"),
+    "mac-arm64": ("chrome-headless-shell-mac-arm64", "chrome-headless-shell"),
+    "win-x64": ("chrome-headless-shell-win64", "chrome-headless-shell.exe"),
+}
+
+
+def make_shell(
+    root: Path, rev: str = REV, layout: tuple[str, str] = SHELL_LAYOUTS["linux-x64"]
+) -> Path:
     """What Playwright leaves in ``root`` once the headless shell is in."""
     build = root / f"chromium_headless_shell-{rev}"
-    exe = build / "chrome-headless-shell-linux64" / "chrome-headless-shell"
+    exe = build / layout[0] / layout[1]
     exe.parent.mkdir(parents=True, exist_ok=True)
     exe.write_bytes(b"")
     (build / "INSTALLATION_COMPLETE").write_bytes(b"")
@@ -136,6 +149,35 @@ def test_only_the_headless_shell_downloads_into_this_packages_directory(
     assert render_module.install_chromium() == exe and len(downloads) == 1, "it downloads once"
 
 
+@pytest.mark.parametrize("host", sorted(SHELL_LAYOUTS))
+def test_the_shell_is_found_in_the_download_of_every_platform(shell_dir, host):
+    """Windows' executable ends in .exe; linux arm64's is headless_shell."""
+    exe = make_shell(shell_dir, layout=SHELL_LAYOUTS[host])
+    assert render_module.shell_executable() == exe
+
+
+def test_the_shell_is_found_in_every_layout_of_the_installed_playwright(tmp_path, monkeypatch):
+    """The layouts of the playwright installed here (its registry in
+    coreBundle.js), whichever version that is."""
+    import importlib.util
+
+    spec = importlib.util.find_spec("playwright")
+    if spec is None or not spec.origin:
+        pytest.skip("playwright is not installed")
+    lib = Path(spec.origin).parent / "driver" / "package" / "lib" / "coreBundle.js"
+    text = lib.read_text(errors="replace")
+    table = text[text.index("EXECUTABLE_PATHS = {") :]
+    block = table[table.index('"chromium-headless-shell": {') :]
+    block = block[: block.index("}")]
+    layouts = re.findall(r'"([a-z0-9.-]+)": \["([^"]+)", "([^"]+)"\]', block)
+    assert {host for host, _, _ in layouts} >= {"linux-x64", "mac-arm64", "win-x64"}, layouts
+    monkeypatch.setattr(render_module, "_shell_revision", lambda: REV)
+    for host, folder, exe_name in layouts:
+        root = tmp_path / host
+        exe = make_shell(root, layout=(folder, exe_name))
+        assert render_module.shell_executable(root) == exe, (host, folder, exe_name)
+
+
 def test_a_download_that_stopped_part_way_is_not_a_shell(shell_dir):
     exe = make_shell(shell_dir)
     (exe.parent.parent / "INSTALLATION_COMPLETE").unlink()
@@ -200,6 +242,27 @@ def test_the_shell_downloads_while_the_scene_does(sim, shell_dir, monkeypatch):
         assert renderer.info["browser"] == "headless-shell"
     finally:
         renderer.close()
+
+
+def test_the_download_does_not_keep_python_from_exiting(shell_dir, monkeypatch):
+    """It runs in a daemon thread: a script that is done does not wait for a
+    120 MB download it never needed."""
+    monkeypatch.setattr(render_module, "chrome_installed", lambda: False)
+    release = threading.Event()
+
+    def run(cmd, **kw):
+        release.wait(10)
+        make_shell(Path(kw["env"]["PLAYWRIGHT_BROWSERS_PATH"]))
+        return SimpleNamespace(returncode=0, stdout=b"")
+
+    monkeypatch.setattr(render_module.subprocess, "run", run)
+    assert render_module.prepare_browser() is True
+    thread = render_module._download["thread"]
+    try:
+        assert thread.is_alive() and thread.daemon
+    finally:
+        release.set()
+        thread.join(10)
 
 
 @pytest.mark.parametrize("case", ["chrome installed", "shell there", "download off", "chrome only"])
@@ -411,10 +474,12 @@ def test_chrome_is_looked_for_where_playwright_looks():
     assert paths("linux", {}) == ["/opt/google/chrome/chrome"]
     assert paths("darwin", {}) == ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
     env = {"LOCALAPPDATA": "C:\\Users\\u\\AppData\\Local", "PROGRAMFILES": "C:\\Program Files"}
+    env["PROGRAMFILES(X86)"] = "C:\\Program Files (x86)"
     env["HOMEDRIVE"] = "D:"
     assert paths("win32", env) == [
         "C:\\Users\\u\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe",
         "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
         "D:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
         "D:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
     ]
