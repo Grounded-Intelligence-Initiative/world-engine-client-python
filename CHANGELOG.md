@@ -66,6 +66,13 @@
   does not, more splats than the GPU holds) is drawn by the browser path,
   with a `RuntimeWarning`, where Playwright is installed; `renderer="wgsl"`
   raises instead.
+- On Windows renderer D draws through D3D12 with FXC, the HLSL compiler
+  Windows has (wgpu uses DXC only when asked), on a GPU and on WARP; CI runs
+  the client's tests on WARP. When renderer D fails on the adapter it opened
+  (a shader the backend's compiler rejects, a validation error), the client
+  takes the next adapter of the search, and the browser path after the last,
+  with one `RuntimeWarning` that names the adapter and the error; the search
+  passes over that adapter for the rest of the process.
 - The `render` extra now brings `wgpu==0.32.0` and, on Linux x86_64 and
   aarch64, `world-engine-swiftshader==0.1.0`. Renderer D adds 10.7 MB to an
   install that has numpy and Pillow on x86_64, 16.4 MB on aarch64.

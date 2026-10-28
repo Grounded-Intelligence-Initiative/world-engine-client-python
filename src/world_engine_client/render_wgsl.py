@@ -22,7 +22,10 @@ bundled SwiftShader of world-engine-swiftshader, Windows' WARP), each probed
 in a subprocess; see :mod:`world_engine_client.wgsl.adapters`. A software
 adapter renders with one RuntimeWarning; rendering below real time (1/0.034 s,
 about 29.4 steps/s, timed after a warm-up) gets one RuntimeWarning too. When
-nothing renders, :class:`NoRenderAdapter` says how to fix that, and
+D fails on the adapter it opened (:class:`PipelineError`: a pipeline the
+backend's compiler rejects, a validation error), :func:`start_renderer` takes
+the next adapter of the search, with one RuntimeWarning. When nothing
+renders, :class:`NoRenderAdapter` says how to fix that, and
 :func:`world_engine_client.connect` falls back to the headless Chrome path
 (``render.LocalRenderer``) where it is installed; so it does for a scene D
 cannot draw (:class:`SceneNotDrawable`), and on a machine whose GPU Vulkan
@@ -40,6 +43,7 @@ import sqlite3
 import struct
 import threading
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +61,18 @@ class NoRenderAdapter(RendererError):
     """No GPU and no software adapter renders here (``code`` renderer_unavailable,
     or software_renderer when ``allow_software=False`` left out a software one
     that might have)."""
+
+
+class PipelineError(NoRenderAdapter):
+    """Renderer D fails on the adapter it opened (``choice``): a pipeline that
+    does not build there (a shader the backend's compiler rejects, FXC on
+    D3D12 say), a validation error. ``error`` says what wgpu raised.
+    :func:`start_renderer` then takes the next adapter of the search."""
+
+    def __init__(self, message: str, *, choice, error: str, **kw):
+        super().__init__(message, code="renderer_unavailable", **kw)
+        self.choice = choice
+        self.error = error
 
 
 class SceneNotDrawable(RendererError):
@@ -155,11 +171,13 @@ def open_adapter(
     cache_dir=None,
     timeout: float = 120.0,
     choice=None,
+    warn: bool = True,
 ):
     """The wgpu adapter D renders with and how it was found:
     ``(adapter, AdapterChoice)``. Probes once per environment (the result is
     kept next to the render cache for a day), or opens ``choice`` (from
-    :func:`find_adapter`). Emits the software warning. Raises NoRenderAdapter."""
+    :func:`find_adapter`). Emits the software warning unless ``warn`` is
+    False. Raises NoRenderAdapter."""
     from .wgsl import adapters
 
     root = _cache_dir(cache_dir)
@@ -174,9 +192,92 @@ def open_adapter(
             )
         except adapters.NoAdapterError as exc:
             raise _no_adapter(exc, allow_software) from None
-    if choice.software:
+    if choice.software and warn:
         adapters.warn_once("software", adapters.software_message(choice), stacklevel=4)
     return found, choice
+
+
+def start_renderer(
+    fetch,
+    scene_init: dict,
+    digests: dict[str, str],
+    *,
+    choice,
+    adapter: str = "auto",
+    allow_software: bool = True,
+    cache_dir=None,
+    timeout: float = 300.0,
+    **options,
+):
+    """:class:`WGSLRenderer` on ``choice`` (from :func:`find_adapter`); when D
+    fails on that adapter (:class:`PipelineError`: a pipeline its compiler
+    rejects, a validation error), on the next one of the search, as often as
+    one fails, with one RuntimeWarning that names each adapter and its error.
+    The search passes over those adapters from then on in this process
+    (``adapters.mark_failed``) and keeps the one it takes for the next session.
+    Raises NoRenderAdapter, naming the failures, when no adapter is left (or
+    the next one needs a Vulkan loader this process did not load): connect()
+    then draws with the browser path. ``options`` go to WGSLRenderer."""
+    from .wgsl import adapters
+
+    search = {"adapter": adapter, "allow_software": allow_software, "cache_dir": cache_dir}
+    probe_timeout = min(float(timeout), 120.0)
+    failures: list[PipelineError] = []
+
+    def failed_on() -> str:
+        return "; ".join(f.reason for f in failures)
+
+    while True:
+        try:
+            opened = open_adapter(choice=choice, timeout=probe_timeout, warn=not failures, **search)
+            renderer = WGSLRenderer(
+                fetch, scene_init, digests, timeout=timeout, opened=opened, **search, **options
+            )
+        except PipelineError as exc:
+            adapters.mark_failed(exc.choice, exc.error)
+            failures.append(exc)
+            try:
+                choice = find_adapter(timeout=probe_timeout, **search)
+            except NoRenderAdapter as none:
+                raise NoRenderAdapter(
+                    f"{failed_on()}; and {none.reason}",
+                    code=none.code,
+                    fixes=[_UPGRADE, *none.fixes],
+                ) from None
+            if adapters.failed(choice):  # a search that does not pass it over
+                raise NoRenderAdapter(
+                    f"{failed_on()}; and the search found no other adapter",
+                    code="renderer_unavailable",
+                    fixes=[_UPGRADE, "or pass images=False for a state-only session"],
+                ) from None
+            continue
+        except NoRenderAdapter as exc:
+            if not failures:
+                raise
+            raise NoRenderAdapter(
+                f"{failed_on()}; and {exc.reason}", code=exc.code, fixes=[_UPGRADE, *exc.fixes]
+            ) from None
+        except SceneNotDrawable as exc:
+            if not failures:
+                raise
+            raise SceneNotDrawable(f"{failed_on()}; and {exc.reason}", code=exc.code) from None
+        if failures:
+            c = renderer.choice
+            renderer.passed_over = failed_on()
+            msg = f"{failed_on()}. Renderer D draws camera images with {c.label} instead"
+            if c.software:
+                adapters.mark_warned("software")  # this warning says it
+                msg += (
+                    ", on the CPU: expect a step or two per second on real scenes, or pass "
+                    "images=False for a state-only session"
+                )
+            warnings.warn(msg, RuntimeWarning, stacklevel=5)
+        return renderer
+
+
+_UPGRADE = (
+    "pip install -U 'world-engine-client[render]' (a newer release may draw with this adapter)"
+)
 
 
 # ------------------------------------------- D on the CPU, Chrome on the GPU
@@ -315,6 +416,7 @@ class WGSLRenderer:
         self._adapter, self.choice = opened
         self.software = bool(self.choice.software)
         self.gpu = self.choice.label
+        self.passed_over = ""  # the adapters D failed on before this one (start_renderer)
         try:
             self.device = create_device(self._adapter)
             self.assets = SceneAssets(
@@ -357,8 +459,15 @@ class WGSLRenderer:
                     f"the scene's assets cannot be drawn: {exc}", code="asset_mismatch"
                 ) from None
             self.load_seconds = time.perf_counter() - started
-        except BaseException:
+        except BaseException as exc:
             self.close()
+            if type(exc).__module__.split(".")[0] == "wgpu":  # a pipeline, a validation error
+                error = f"{type(exc).__name__}: {' '.join(str(exc).split())}"[:600]
+                raise PipelineError(
+                    f"renderer D cannot draw on {self.gpu}: {error}",
+                    choice=self.choice,
+                    error=error,
+                ) from exc
             raise
         self._speed = adapters.SpeedCheck(self.choice)
         self.last_timings: dict = {}
@@ -383,9 +492,12 @@ class WGSLRenderer:
         }
         if self._scene is not None:
             out["lighting"] = self._scene.info.get("lighting")
+        reasons = [self.passed_over] if self.passed_over else []
         if c.software:
             failed = [f"{t['step']}: {t.get('error')}" for t in c.trail if not t.get("ok")]
-            out["reason"] = "; ".join(failed) or "no hardware adapter"
+            reasons.append("; ".join(failed) or "no hardware adapter")
+        if reasons:
+            out["reason"] = "; ".join(reasons)
         if self._speed.rate is not None:
             out["steps_per_s"] = round(self._speed.rate, 2)
         return out

@@ -423,6 +423,160 @@ def test_render_options_go_to_the_renderer_that_uses_them(stub, monkeypatch):
     assert searched["adapter"] == "name:Intel" and searched["timeout"] == 9
 
 
+# ----------------------------------- renderer D's pipelines fail on an adapter
+class GPUValidationError(Exception):
+    """Stands in for wgpu's, from the wgpu package as wgpu's is."""
+
+
+GPUValidationError.__module__ = "wgpu._classes"
+FXC = (
+    "Validation Error\n\nCaused by:\n  In wgpuDeviceCreateComputePipeline\n    Internal error: FXC "
+    "D3DCompile error (Unspecified error (0x80004005)): sort(327,21-43): error X3500: array "
+    "reference cannot be used as an l-value; not natively addressable"
+)
+
+
+class PipelineAdapter:
+    """An adapter whose device builds pipelines, or raises what wgpu raises
+    when FXC (D3D12) rejects a shader."""
+
+    def __init__(self, choice, fails: bool):
+        self.choice, self.fails = choice, fails
+
+    def create_compute_pipeline(self, **kw):
+        if self.fails:
+            raise GPUValidationError(FXC)
+        return object()
+
+    def destroy(self):
+        pass
+
+
+class CoreOnAnyDevice:
+    """Renderer D's core as far as these tests go: it builds a pipeline on its
+    device first, as the real one does, then draws grey images."""
+
+    color_format = "rgba16float"
+    info = {"lighting": "scene"}
+    last_timing: dict = {}
+
+    def __init__(self, scene_init, read, *, device, **kw):
+        device.create_compute_pipeline(layout="auto", compute={"entry_point": "sort_scatter"})
+
+    def render(self, state):
+        return {c["name"]: np.full((c["h"], c["w"], 3), 128, np.uint8) for c in state["cameras"]}
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def pipelines_fail(monkeypatch):
+    """A Windows machine as the adapter search sees it: a GPU on D3D12, then
+    WARP. Renderer D's pipelines fail on the adapters whose names the test puts
+    in the returned set (the GPU's at first). Nothing here needs wgpu."""
+    from world_engine_client.wgsl import adapters
+    from world_engine_client.wgsl import render_wgsl as core
+
+    gpu = adapters.AdapterChoice(
+        step="system", device="NVIDIA GeForce RTX 4090", adapter_type="DiscreteGPU", backend="D3D12"
+    )
+    warp = adapters.AdapterChoice(
+        step="warp",
+        device="Microsoft Basic Render Driver",
+        adapter_type="CPU",
+        backend="D3D12",
+        software=True,
+        pick="fallback",
+    )
+    failing = {gpu.device}
+
+    def search(**kw):
+        for c in (gpu, warp):
+            if not adapters.failed(c):
+                return c
+        raise render_wgsl.NoRenderAdapter(
+            "no GPU or software adapter renders camera images here (system: "
+            f"{gpu.device}: {adapters.PASSED_OVER}; warp: {warp.device}: {adapters.PASSED_OVER})",
+            code="renderer_unavailable",
+            fixes=["or pass images=False for a state-only session"],
+        )
+
+    monkeypatch.setattr(adapters, "_failed", {})
+    monkeypatch.setattr(adapters, "_warned", set())
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    monkeypatch.setattr(render_wgsl, "find_adapter", search)
+    monkeypatch.setattr(
+        render_wgsl,
+        "open_adapter",
+        lambda choice=None, **kw: (PipelineAdapter(choice, choice.device in failing), choice),
+    )
+    monkeypatch.setattr(core, "create_device", lambda adapter: adapter)
+    monkeypatch.setattr(core, "WgslRenderer", CoreOnAnyDevice)
+    return failing
+
+
+def test_where_d_fails_on_the_gpu_it_draws_with_the_next_adapter(stub, pipelines_fail):
+    """FXC rejects a shader on the GPU's D3D12 adapter: connect() draws with
+    WARP, the search's next adapter, with one warning that names the GPU and
+    the compiler's error; the GPU is passed over from then on."""
+    from world_engine_client.wgsl import adapters
+
+    env, texts = _connect_d(stub)
+    try:
+        assert isinstance(env.renderer, render_wgsl.WGSLRenderer)
+        assert env.renderer.choice.device == "Microsoft Basic Render Driver"
+        assert len(texts) == 1, texts
+        assert "NVIDIA GeForce RTX 4090 (DiscreteGPU, D3D12)" in texts[0]
+        assert "error X3500" in texts[0] and "Microsoft Basic Render Driver" in texts[0]
+        assert "images=False" in texts[0], "it says the CPU draws, once"
+        obs, info = env.reset(seed=0)
+        assert info["render"]["renderer"] == "wgsl" and info["render"]["software"]
+        assert "error X3500" in info["render"]["reason"]
+        assert all(im.mean() == 128 for im in obs["rgb"].values())
+    finally:
+        env.close()
+    failed = [c for c in adapters._failed]
+    assert failed == [("NVIDIA GeForce RTX 4090", "D3D12", "DiscreteGPU")]
+
+
+def test_where_d_fails_on_every_adapter_the_browser_path_draws(stub, chrome, pipelines_fail):
+    pipelines_fail.add("Microsoft Basic Render Driver")
+    env, texts = _connect_d(stub)
+    try:
+        assert isinstance(env.renderer, FakeChrome)
+        assert len(texts) == 1, texts
+        assert "headless Chrome instead" in texts[0]
+        assert "NVIDIA GeForce RTX 4090" in texts[0] and "Microsoft Basic Render Driver" in texts[0]
+        assert "error X3500" in texts[0]
+    finally:
+        env.close()
+
+
+def test_a_search_that_takes_the_failed_adapter_again_does_not_loop(
+    stub, chrome, pipelines_fail, monkeypatch
+):
+    gpu = render_wgsl.find_adapter()  # the fixture's search: the GPU first
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: gpu)
+    env, texts = _connect_d(stub)
+    try:
+        assert isinstance(env.renderer, FakeChrome)
+        assert len(texts) == 1 and "found no other adapter" in texts[0], texts
+    finally:
+        env.close()
+
+
+def test_where_d_fails_on_every_adapter_without_the_browser_path_connect_says_why(
+    stub, chrome, pipelines_fail
+):
+    pipelines_fail.add("Microsoft Basic Render Driver")
+    with pytest.raises(render_wgsl.NoRenderAdapter) as err:
+        _connect_d(stub, renderer="wgsl")
+    text = str(err.value)
+    assert "NVIDIA GeForce RTX 4090" in text and "Microsoft Basic Render Driver" in text
+    assert "error X3500" in text and "pip install -U" in text and FakeChrome.instances == []
+
+
 def test_open_adapter_says_what_failed_and_how_to_fix_it(monkeypatch, tmp_path):
     from world_engine_client.wgsl import adapters
 

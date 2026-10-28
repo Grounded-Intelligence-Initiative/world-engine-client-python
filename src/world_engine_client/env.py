@@ -463,12 +463,14 @@ class RemoteEnv:
     def _start_renderer(self, bundle: dict, chrome_ok: bool):
         """Renderer D for protocol 2, the browser path for protocol 1. The
         browser path also draws a protocol-2 session when D finds no adapter
-        that renders (design doc 16 §9.9 runtime, step 5), when D cannot draw
-        the scene, and when D would draw on the CPU while Chrome reaches the
-        machine's GPU through OpenGL (a GPU without a Vulkan driver)."""
+        that renders (design doc 16 §9.9 runtime, step 5), when D fails on every
+        adapter it can open (its pipelines do not build there: it tries the next
+        adapter of the search first), when D cannot draw the scene, and when D
+        would draw on the CPU while Chrome reaches the machine's GPU through
+        OpenGL (a GPU without a Vulkan driver)."""
         from . import render_wgsl
         from .render import LocalRenderer
-        from .render_wgsl import NoRenderAdapter, SceneNotDrawable, WGSLRenderer
+        from .render_wgsl import NoRenderAdapter, SceneNotDrawable
 
         d_opts, chrome_opts, _ = self._render_split
         parsed = urllib.parse.urlsplit(self._base)
@@ -496,8 +498,7 @@ class RemoteEnv:
                     chrome = self._chrome_on_the_gpu(args, common, chrome_opts, choice, search)
                     if chrome is not None:
                         return chrome
-                opened = render_wgsl.open_adapter(choice=choice, timeout=timeout, **search)
-                return WGSLRenderer(*args, **common, **d_opts, opened=opened)
+                return render_wgsl.start_renderer(*args, **common, **d_opts, choice=choice)
             except (NoRenderAdapter, SceneNotDrawable) as exc:
                 if not chrome_ok:
                     raise

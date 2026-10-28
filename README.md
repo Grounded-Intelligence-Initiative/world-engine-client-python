@@ -116,7 +116,11 @@ bundled SwiftShader. The bundled loader and SwiftShader come in the package
 aarch64. On Windows the order is the GPU, then WARP (Windows' software
 renderer); on macOS, Metal. Each step is tried in a short-lived subprocess,
 and the result is kept for a day next to the render cache, so a later connect
-does not try again. With a software adapter, one `RuntimeWarning` says so;
+does not try again. When renderer D then fails on the adapter it opened (a
+shader the backend's compiler rejects, a validation error), the client takes
+the next adapter in this order, with one `RuntimeWarning` that names the
+adapter and the error, and after the last one the browser path. With a
+software adapter, one `RuntimeWarning` says so;
 expect about a step per second on a real scene. A second warning comes after a
 warm-up when the rendering is slower than real time (29.4 steps per second, one
 step per 0.034 s), naming the adapter, its type and the measured rate. On a
