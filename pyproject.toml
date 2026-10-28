@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "world-engine-client"
-version = "0.5.0"
+version = "0.6.0"
 description = "Remote Gym-style Python client for a World Engine simulation server: connect(token) -> reset/step over HTTP."
 readme = "README.md"
 requires-python = ">=3.11"

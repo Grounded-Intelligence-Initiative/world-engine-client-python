@@ -188,6 +188,52 @@ R = rot6d_to_matrix(demo["action_dict/abs_rot_6d"][t])
   `ResetRequiredError`, `TeleopActiveError`, `BadConfigError`) and carry the
   server's "Possible fixes" hints.
 
+## Rewards
+
+`step()` returns the task's reward, and `env.metadata.get("reward_type")`
+names its kind: `"sparse"`, `"dense"` or `"staged"`. It is `None` without a
+task, and servers from before staged rewards do not send it. A `sparse` reward
+pays `success_reward` on success and a `dense` reward is the task template's
+distance shaping. A `staged` reward pays stage points. The server divides it
+by the task's total points, so an episode that finishes sums to 1.0. This is
+the default, and older clients get the same.
+
+To get a staged reward in points, connect with `normalize_reward=False`:
+
+```python
+env = we_client.connect(token, url=..., normalize_reward=False)
+```
+
+Each reward is then multiplied by `info["task_progress"]["reward"]["max"]`, the
+task's total points. A step pays the points it earned, less the failure penalty
+on the step that fails. With partial credit on (the task's
+`reward.partial_credit`), a stage pays part of its points while some of its
+conditions hold. A step on which one stops holding gives that part back: its
+reward is negative, though nothing failed and no penalty is taken. A step never
+pays the running total again, so holding a state that already scored earns
+nothing more. The running totals, in points, are in
+`info["task_progress"]["reward"]`: `earned`, `max`, `penalty` and
+`earned_by_stage`. After every step of an episode that started with `reset()`,
+the rewards so far add up to `earned - penalty` of that step's info, up to
+floating-point rounding (compare with `math.isclose`).
+
+- The points of stages that end at reset come with the first step.
+  `info["task_progress"]["completed_at"]` gives those stages step 0.
+- An episode decided at reset still takes one step. It does not move the world,
+  returns `terminated=True` and the reset's info, and pays those points.
+- After attaching with `mode="resume"`, the rewards cover the steps this client
+  took. The points paid before it attached are not in the sum.
+- `as_gymnasium()` and wrappers such as `RecordEpisodeStatistics` see the same
+  rewards, so `info["episode"]["r"]` is in points too.
+- `sparse` and `dense` rewards are the same with either setting.
+- The switch is unrelated to Gymnasium's `NormalizeReward` wrapper, which
+  scales rewards by a running estimate of the return's spread. The wrapper
+  works on top of either setting.
+
+With `normalize_reward=False`, a staged step whose info has no usable
+`task_progress.reward.max` raises `ProtocolError`, and the next step needs a
+`reset()`. A server with staged rewards always sends it.
+
 ## Development
 
 ```bash

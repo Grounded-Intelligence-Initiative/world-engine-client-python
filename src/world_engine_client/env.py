@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import threading
 import time
 import urllib.parse
@@ -52,6 +53,7 @@ def connect(
     access_provider=None,
     render: str = "auto",
     render_options: dict | None = None,
+    normalize_reward: bool = True,
 ) -> RemoteEnv:
     """Bind to the server as THE controller and return a ready RemoteEnv.
 
@@ -68,10 +70,23 @@ def connect(
     same thing; kept for callers that pass it). ``render_options`` go to
     :class:`world_engine_client.render.LocalRenderer` (``cache_dir``,
     ``allow_software`` (default True; False refuses software rendering),
-    ``chrome_args``, ``auto_install``, ``timeout``)."""
+    ``chrome_args``, ``auto_install``, ``timeout``).
+
+    ``normalize_reward`` (default True) returns each reward as the server sends
+    it. The server divides a ``staged`` reward by the task's total points, so an
+    episode that finishes sums to 1.0. With False a staged reward comes back in
+    points, ``reward * info["task_progress"]["reward"]["max"]``: the points the
+    step earned, less the failure penalty on the step that fails. A step that
+    gives partial credit back is negative without a failure. Over an episode
+    from :meth:`RemoteEnv.reset` they add up to ``earned - penalty`` of the last
+    ``info["task_progress"]["reward"]``. ``sparse`` and ``dense`` rewards, as
+    the env's ``reward_type`` names them, come back unchanged either way."""
     if render not in ("auto", "local"):
         raise ValueError("render must be 'auto' or 'local': servers no longer render camera images")
+    if not isinstance(normalize_reward, bool):
+        raise TypeError(f"normalize_reward must be True or False, not {normalize_reward!r}")
     env = RemoteEnv(url.rstrip("/"), token, timeout=timeout)
+    env.normalize_reward = normalize_reward
     env._access_provider = access_provider
     env._render_request = render
     env._render_options = dict(render_options or {})
@@ -128,6 +143,8 @@ class RemoteEnv:
         self._render_request = "server"
         self._render_options: dict = {}
         self.renderer = None  # LocalRenderer when images are rendered on this machine
+        # False: step() returns a staged reward in points (see connect).
+        self.normalize_reward = True
 
     # ----- Gym API ------------------------------------------------------------ #
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -155,13 +172,44 @@ class RemoteEnv:
                 f"action must be a finite numeric vector of shape ({self.action_dim},)"
             )
         reply = self._post("/control/step", {"action": [float(x) for x in a]})
+        info = reply.get("info", {})
         return (
             self._remember(reply),
-            float(reply["reward"]),
+            self._reward(float(reply["reward"]), info),
             bool(reply["terminated"]),
             bool(reply["truncated"]),
-            reply.get("info", {}),
+            info,
         )
+
+    def _reward(self, reward: float, info: dict) -> float:
+        """The step's reward, in points for a staged task when normalize_reward
+        is False. The server divides a staged reward by the task's total
+        points, which every step's info carries; sparse and dense rewards are
+        not divided."""
+        if self.normalize_reward:
+            return reward
+        progress = info.get("task_progress")
+        totals = progress.get("reward") if isinstance(progress, dict) else None
+        kind = self.metadata.get("reward_type")
+        if kind is None:
+            # A server older than staged rewards, or no task: only a staged
+            # reward has totals in the step's info.
+            staged = totals is not None
+        else:
+            staged = kind == "staged"
+        if not staged:
+            return reward
+        total = totals.get("max") if isinstance(totals, dict) else None
+        points = reward * total if type(total) in (int, float) and total > 0 else math.nan
+        if not math.isfinite(points):
+            # The step ran, but its reward cannot be given in points.
+            self._uncertain = True
+            raise ProtocolError(
+                "cannot give a staged reward in points: info['task_progress']['reward']['max'] "
+                "is missing or not a positive number; explicit reset required",
+                fixes=["connect with normalize_reward=True to take rewards as the server sends"],
+            )
+        return points
 
     def observe(self):
         reply = self._post("/control/observe", {})
