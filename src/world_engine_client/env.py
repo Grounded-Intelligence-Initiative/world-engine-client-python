@@ -464,7 +464,7 @@ class RemoteEnv:
         from .render import LocalRenderer
         from .render_wgsl import NoRenderAdapter, SceneNotDrawable, WGSLRenderer
 
-        d_opts, chrome_opts, wants = self._render_split
+        d_opts, chrome_opts, _ = self._render_split
         parsed = urllib.parse.urlsplit(self._base)
         common = {
             "bundle": bundle,
@@ -483,12 +483,9 @@ class RemoteEnv:
             timeout = min(float(d_opts.get("timeout", 300.0)), 120.0)
             try:
                 choice = render_wgsl.find_adapter(timeout=timeout, **search)
-                if (
-                    chrome_ok
-                    and wants == "auto"
-                    and render_wgsl.chrome_may_be_faster(
-                        choice, chrome_args=chrome_opts.get("chrome_args"), **search
-                    )
+                # chrome_ok is False when render_options asks for renderer "wgsl".
+                if chrome_ok and render_wgsl.chrome_may_be_faster(
+                    choice, chrome_args=chrome_opts.get("chrome_args"), **search
                 ):
                     chrome = self._chrome_on_the_gpu(args, common, chrome_opts, choice, search)
                     if chrome is not None:

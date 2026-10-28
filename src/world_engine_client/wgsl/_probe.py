@@ -280,6 +280,7 @@ def main(argv=None) -> int:
         from wgpu.backends.wgpu_native.extras import set_instance_extras
 
         res["wgpu"] = wgpu.__version__
+        res["numpy"] = np.__version__
         # Vulkan, Metal and D3D12 only: an OpenGL adapter has no compute.
         set_instance_extras(backends=["Primary"])
         adapters = wgpu.gpu.enumerate_adapters_sync()
