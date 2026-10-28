@@ -1,3 +1,4 @@
-# The copy of renderer D is pinned byte for byte (src/world_engine_client/wgsl/SOURCE.json,
-# tests/test_wgsl_vendored.py): no line-ending conversion when Git checks it out on Windows.
-src/world_engine_client/wgsl/** -text
+# The package is held to its bytes: the copy of renderer D by its SHA-256 (wgsl/SOURCE.json,
+# tests/test_wgsl_vendored.py) and renderer D's files by the bench's digest (bench/igpu/refs).
+# No line-ending conversion when Git checks it out on Windows.
+src/world_engine_client/** -text
