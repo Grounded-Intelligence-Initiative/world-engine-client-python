@@ -210,11 +210,13 @@ images (rgba16float) and Spark's (PNG readback through the same capture
 page). Both rendered twice the same. Renderer D against Spark there: room200k
 1.629/255, r2_400k 0.402/255.
 
-The same bench there, 2026-10-28, three rounds (render only, three 256×256
-cameras of r2_400k; only GPU0 visible). The machine, a Threadripper PRO
-5975WX with 64 threads, was shared: the load average at the start of a run
-was 5 to 34 for the RTX 4090 rows, 17 to 46 for lavapipe and 18 to 87 for
-SwiftShader. The CPU rows force Chrome onto its SwiftShader
+The same bench there, 2026-10-28, three rounds, with the code of this commit
+and the client installed from its wheel (render only, three 256×256 cameras
+of r2_400k; only GPU0 visible). The machine, a Threadripper PRO 5975WX with
+64 threads, was shared, with other work rendering in Chrome on its CPU at
+the same time: the load average at the start of a run was 20 to 34 for the
+RTX 4090 rows, 27 to 46 for lavapipe and 17 to 39 for SwiftShader. The CPU
+rows force Chrome onto its SwiftShader
 (`--chrome-args "--headless=new --use-angle=swiftshader --enable-unsafe-swiftshader --no-sandbox"`)
 and renderer D onto a CPU adapter (`--adapter software`; for the bundled
 SwiftShader also `--d-env VK_ICD_FILENAMES=/nonexistent/none.json`, which
@@ -222,17 +224,21 @@ hides lavapipe):
 
 | renderer D on | D, steps/s | Chrome, steps/s | D / Chrome | D rgba8unorm | room200k: D vs 4090 D | D vs Spark | Chrome (JPEG) vs Spark | Spark here vs 4090 Spark |
 |---|---|---|---|---|---|---|---|---|
-| RTX 4090 (Chrome: the 4090 through ANGLE GL ES) | 192.0 (188.8–197.2) | 17.44 (17.38–17.49) | 11.0 | 210.8 | 0.000 | 1.629 | 2.607 | 0.000 |
-| lavapipe (Chrome: its SwiftShader) | 3.06 (2.46–3.17) | 0.081 (0.075–0.089) | 37.8 | 3.05 | 0.071 | 1.630 | 2.855 | 1.487 |
-| bundled SwiftShader (Chrome: its SwiftShader) | 0.92 (0.91–0.92) | 0.078 (0.076–0.080) | 11.8 | 0.91 | 0.070 | 1.631 | 2.855 | 1.487 |
+| RTX 4090 (Chrome: the 4090 through ANGLE GL ES) | 190.2 (184.4–191.9) | 16.02 (15.96–17.34) | 11.9 | 210.0 | 0.000 | 1.629 | 2.607 | 0.000 |
+| lavapipe (Chrome: its SwiftShader) | 3.38 (3.36–3.38) | 0.078 (0.077–0.088) | 43.3 | 3.47 | 0.071 | 1.630 | 2.855 | 1.487 |
+| bundled SwiftShader (Chrome: its SwiftShader) | 0.98 (0.93–1.08) | 0.089 (0.085–0.097) | 11.0 | 1.02 | 0.070 | 1.631 | 2.855 | 1.487 |
 
 Medians over the rounds, ranges in brackets; D / Chrome is the ratio of the
-medians. The quality columns are the mean |difference| over the five room200k
-reference images, in 1/255. Every check passed on all three. Renderer D's
-images were the same in every round on each adapter, and so were the browser
-path's. A run two hours earlier, with the same measuring code (its records
-kept less: no load average), gave the same quality numbers and a D / Chrome
-of 10.7, 34.7 and 10.1.
+medians (per round 11.6, 12.0 and 11.0; 43.9, 43.4 and 38.2; 10.1, 12.1 and
+10.9). The quality columns are the mean |difference| over the five room200k
+reference images, in 1/255. The verdict was `PASS` on all three: every run
+worked, both paths ran on the one GPU (or both on the CPU), and the client
+was this checkout's. Renderer D's images were the same in every round on
+each adapter, and so were the browser path's; no run printed anything on
+stderr. Two runs earlier the same day, with the code before this commit,
+gave the same quality numbers and a D / Chrome of 10.7, 34.7 and 10.1, then
+11.0, 37.8 and 11.8. `make_refs.py --sets d` on the RTX 4090 made renderer
+D's ten reference images again byte for byte.
 
 ## Files
 

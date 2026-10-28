@@ -160,7 +160,8 @@ to the `world_engine_client.render` logger. Set `WE_RENDER_AUTO_INSTALL=0` or
 pass `render_options={"auto_install": False}` to turn it off, and run
 `python -m world_engine_client.render install` to download it yourself
 (`python -m world_engine_client.render where` shows what is there).
-`WE_RENDER_BROWSER=chrome` or `WE_RENDER_BROWSER=shell` uses only that one.
+`WE_RENDER_BROWSER=chrome` or `WE_RENDER_BROWSER=shell` uses only that one
+(any other value stops `connect()` with a `RendererError` that says so).
 On a minimal Linux system the shell may also need Chromium's system
 libraries: `python -m playwright install-deps chromium` (needs sudo).
 `info["render"]` names the browser and its version.
@@ -406,7 +407,9 @@ an installed Google Chrome.
 
 `bench/igpu/` (see its README) times renderer D against the browser path on
 this machine's GPU and compares their images with an RTX 4090's: the bench for
-integrated GPUs, which neither CI nor the development machine has.
+integrated GPUs, which neither CI nor the development machine has. Its
+browser-path runs need the engine's capture page, which is not in this
+repository (`--capture-page`).
 
 `tests/test_render_wgsl.py` draws a small scene with renderer D through
 `connect()`, on whatever adapter the machine has; it is skipped without one,

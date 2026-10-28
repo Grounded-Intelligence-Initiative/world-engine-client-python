@@ -26,11 +26,19 @@
   missing system libraries; the latter is now `python -m playwright
   install-deps chromium`, which installs no browser.
 - `WE_RENDER_BROWSER=chrome` or `WE_RENDER_BROWSER=shell` makes the browser
-  path use only an installed Google Chrome or only the headless shell.
-  `info["render"]` of the browser path names the browser and its version.
+  path use only an installed Google Chrome or only the headless shell. Any
+  other value stops `connect()` with a `RendererError` (code `bad_config`)
+  that says how to fix it; the check of Chrome on the GPU does not keep it
+  as "no Chrome on the GPU". `info["render"]` of the browser path names the
+  browser and its version.
 - `bench/igpu/` in the repository (not in the package or the sdist): a
   portable bench of renderer D against the browser path, for integrated GPUs
-  on macOS, Linux and Windows. See its README.
+  on macOS, Linux and Windows. The engine's capture page that its
+  browser-path runs need is not in the repository: it takes the build as a
+  directory or a zip (`--capture-page`) and checks it against
+  `capture_page/MANIFEST.json`. It runs the client of its own checkout,
+  judges the speed only where both paths ran on the same GPU, and calls a
+  result `PASS` only when every run worked. See its README.
 
 ## 0.6.0
 
