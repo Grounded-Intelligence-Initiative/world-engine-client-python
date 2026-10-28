@@ -66,13 +66,13 @@ jobs:
       - run: python -c "from world_engine_client import render, render_wgsl; assert render.available() and render_wgsl.available()"
       # The browser path's own headless shell, downloaded where the client
       # keeps it (not Playwright's directory), and Chromium's system libraries.
-      # WE_RENDER_BROWSER=shell: the tests use it, not the runner's Chrome.
+      # WE_TEST_BROWSER=shell: the real-Chrome tests use it, not the runner's Chrome.
       - run: echo "DIGIARENA_BROWSERS_DIR=$RUNNER_TEMP/browsers" >> "$GITHUB_ENV"
       - run: python -m playwright install-deps chromium
       - run: python -m world_engine_client.render install
       - run: python -m pytest
         env:
-          WE_RENDER_BROWSER: shell
+          WE_TEST_BROWSER: shell
           WE_TEST_REQUIRE_CHROME: "1"
           WE_TEST_REQUIRE_WGSL: "1"
           WE_TEST_EXPECT_ADAPTER: lavapipe

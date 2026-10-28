@@ -149,6 +149,10 @@ def private_cache(tmp_path, monkeypatch):
         monkeypatch.setenv("DIGIARENA_BROWSERS_DIR", str(user_cache / "digiarena" / "browsers"))
     if os.environ.get("WE_RENDER_AUTO_INSTALL") is None:
         monkeypatch.setenv("WE_RENDER_AUTO_INSTALL", "0")
+    # The stand-ins for Chrome launch as the "chrome" channel: a browser
+    # choice of the user's would turn them away (see test_render_chrome.py
+    # for WE_TEST_BROWSER).
+    monkeypatch.delenv("WE_RENDER_BROWSER", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(root))
     if sys.platform.startswith("linux"):
         monkeypatch.delenv("DIGIARENA_CACHE_DIR", raising=False)

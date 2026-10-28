@@ -401,7 +401,7 @@ tests (real client against a real server) live in the server repo:
 SwiftShader. It is skipped without the `render` extra or a browser;
 `WE_TEST_REQUIRE_CHROME=1` makes it fail instead. The tests use the headless
 shell in your `<user cache dir>/digiarena/browsers` (or `DIGIARENA_BROWSERS_DIR`)
-and never download one; `WE_RENDER_BROWSER=shell` makes them use it rather than
+and never download one; `WE_TEST_BROWSER=shell` makes them use it rather than
 an installed Google Chrome.
 
 `bench/igpu/` (see its README) times renderer D against the browser path on

@@ -29,6 +29,17 @@ if not REQUIRED:
 SWIFTSHADER = ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
 SWIFTSHADER += ["--no-sandbox"]
 FIRST_FRAME_MS = 1500  # longer than the probe patched below, far shorter than the timeout
+# WE_TEST_BROWSER=shell (the CI job) runs these on this package's headless
+# shell rather than an installed Google Chrome; WE_TEST_BROWSER=chrome on Chrome.
+BROWSER = os.environ.get("WE_TEST_BROWSER")
+
+
+@pytest.fixture(autouse=True)
+def browser(monkeypatch):
+    if BROWSER:
+        monkeypatch.setenv("WE_RENDER_BROWSER", BROWSER)
+
+
 COLOR = (0.2, 0.6, 0.4)
 
 PAGE = string.Template("""<!doctype html>
@@ -118,6 +129,8 @@ def test_software_rendering_is_not_held_to_the_hardware_probe(small_scene, monke
             raise
     try:
         assert env.renderer.software and "SwiftShader" in env.renderer.gpu
+        if BROWSER:
+            assert env.renderer.info["browser"] == {"shell": "headless-shell"}.get(BROWSER, BROWSER)
         software = [w for w in log if "in software" in str(w.message)]
         assert len(software) == 1 and software[0].category is RuntimeWarning
         obs, _ = env.reset(seed=0)
