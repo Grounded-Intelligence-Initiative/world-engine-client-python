@@ -105,6 +105,52 @@ def test_a_platform_session_keeps_only_ciphertext_on_disk(stub, d):
     assert plaintext_files(cache_root(), tempfile.gettempdir()) == []
 
 
+def test_renderer_d_downloads_what_it_draws_and_not_the_glbs(stub, d):
+    """The objects arrive as the engine's WEM1; their GLBs are the browser
+    path's, and a session of renderer D leaves them on the server."""
+    platform = DPlatform(stub)
+    env = connect(stub)
+    try:
+        env.reset(seed=0)
+        assert isinstance(env.renderer, render_wgsl.WGSLRenderer)
+        got = {u for u, n in platform.downloads.items() if n}
+        assert got == {"/__asset/0.ply", "/__asset/1.wem1", "/__robot/0.bin"}, got
+    finally:
+        env.close()
+
+
+def test_the_assets_renderer_d_reads():
+    si = {
+        "splat": {"url": "/__asset/0.ply"},
+        "meshes": [
+            {"id": "a", "url": "/__asset/1.glb", "wem": "/__asset/1.wem1"},
+            {"id": "b", "box": [0.1, 0.1, 0.1]},
+            {"id": "c", "url": "/__asset/3.glb"},  # no WEM1: D raises before reading it
+        ],
+        "hdri": {"url": "/__asset/hdri.exr"},
+        "robot": {"links": [{"name": "l", "url": "/__robot/0.bin"}]},
+    }
+    digests = {
+        u: "0" * 64
+        for u in (
+            "/__asset/0.ply",
+            "/__asset/1.glb",
+            "/__asset/1.wem1",
+            "/__asset/3.glb",
+            "/__asset/hdri.exr",
+            "/__robot/0.bin",
+            "/__asset/9.png",
+        )
+    }
+    assert set(render_wgsl.drawn_assets(si, digests)) == {
+        "/__asset/0.ply",
+        "/__asset/1.wem1",
+        "/__asset/hdri.exr",
+        "/__robot/0.bin",
+    }
+    assert render_wgsl.drawn_assets({"splat": None, "meshes": []}, digests) == {}
+
+
 def test_the_meshes_are_lit_and_shaded_as_the_capture_page_draws_them(stub, d):
     """wgsl/1 draws M-D2's meshes: the scene's own lighting baked at its light
     probe (the golden splats light the box), three's MeshStandardMaterial."""

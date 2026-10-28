@@ -318,7 +318,7 @@ class WGSLRenderer:
             self.device = create_device(self._adapter)
             self.assets = SceneAssets(
                 fetch,
-                dict(digests),
+                drawn_assets(scene_init, digests),
                 encrypted=mode == "encrypted",
                 platform=platform,
                 cache_dir=cache_dir,
@@ -426,6 +426,21 @@ class WGSLRenderer:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def drawn_assets(scene_init: dict, digests: dict[str, str]) -> dict[str, str]:
+    """The digests of the assets renderer D reads: the splat, the objects' WEM1,
+    the robot links, an HDRI or lighting asset. Not the objects' GLBs (the
+    browser path's), so a session of D does not download them; when D cannot
+    draw the scene, the browser path downloads the rest."""
+    urls = {
+        (scene_init.get(key) or {}).get("url") for key in ("splat", "hdri", "lighting")
+    }
+    for mesh in scene_init.get("meshes") or []:
+        urls.add(mesh.get("wem"))
+    for link in (scene_init.get("robot") or {}).get("links") or []:
+        urls.add(link.get("url"))
+    return {u: d for u, d in digests.items() if u in urls}
 
 
 def env_options(options: dict) -> tuple[dict, dict, str]:
