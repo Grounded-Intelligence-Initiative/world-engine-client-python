@@ -154,11 +154,31 @@ def test_a_capture_page_is_taken_from_a_directory_or_a_zip_and_checked(tmp_path)
             sorted(m["files"])
         ), "only the manifest's files, under its names"
         assert not (tmp_path / "outside.js").exists()
+    altered = tmp_path / "altered.zip"
+    with zipfile.ZipFile(altered, "w") as z:
+        for name in m["files"]:
+            data = (src / name).read_bytes()
+            z.writestr(name, data + b"//" if name.endswith(".js") else data)
+    with pytest.raises(SystemExit, match="main-T3st.js"):
+        page.load(altered, tmp_path / "x", m)
     (src / "assets" / "scene-T3st.js").write_bytes(b"export const splats = 2;")
     with pytest.raises(SystemExit, match="scene-T3st.js"):
         page.load(src, tmp_path / "x", m)
     with pytest.raises(SystemExit, match="neither a directory nor a zip"):
         page.load(tmp_path / "missing.zip", tmp_path / "x", m)
+
+
+def test_where_the_bench_looks_for_the_capture_page(tmp_path, monkeypatch):
+    """--capture-page, else IGPU_BENCH_CAPTURE_PAGE, else capture_page/ when
+    someone put the build there, else nothing."""
+    monkeypatch.setattr(page, "DEFAULT", tmp_path / "capture_page")
+    monkeypatch.delenv(page.ENV, raising=False)
+    assert page.locate() is None
+    fake_page(tmp_path / "capture_page")
+    assert page.locate() == tmp_path / "capture_page"
+    monkeypatch.setenv(page.ENV, str(tmp_path / "from-env.zip"))
+    assert page.locate() == tmp_path / "from-env.zip"
+    assert page.locate(tmp_path / "given") == tmp_path / "given"
 
 
 def test_the_zip_packs_the_same_bytes_and_the_bench_takes_it(tmp_path):
@@ -517,6 +537,41 @@ def test_a_client_that_is_not_the_checkouts_leaves_the_result_incomplete():
 
 
 @pytest.mark.parametrize(
+    "text, name",
+    [
+        ("NVIDIA GeForce RTX 4090", "nvidia geforce rtx 4090"),
+        (
+            "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4090/PCIe/SSE2, OpenGL ES 3.2)",
+            "nvidia geforce rtx 4090",
+        ),
+        (
+            "ANGLE (Intel, Mesa Intel(R) UHD Graphics (TGL GT1), OpenGL ES 3.2)",
+            "intel uhd graphics (tgl gt1)",
+        ),
+        (
+            "ANGLE (Intel, Intel(R) UHD Graphics (0x00009A60) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            "intel uhd graphics",
+        ),
+        (
+            "ANGLE (Intel, Vulkan 1.3.255 (Intel(R) UHD Graphics (TGL GT1) (0x00009A60)), "
+            "Intel open-source Mesa driver-23.2.1)",
+            "intel uhd graphics (tgl gt1)",
+        ),
+        ("ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)", "apple m4 pro"),
+        (
+            "ANGLE (Mesa, llvmpipe (LLVM 15.0.7, 256 bits), OpenGL ES 3.2)",
+            "llvmpipe (llvm 15.0.7, 256 bits)",
+        ),
+        (None, None),
+    ],
+)
+def test_the_names_compared_are_the_devices(text, name):
+    """What summary.same_gpu lists: the device of Chrome's ANGLE string,
+    without its vendor and API fields, "(R)", PCI ids and backend words."""
+    assert run.device_name(text) == name
+
+
+@pytest.mark.parametrize(
     "d, chrome, same",
     [
         (
@@ -566,6 +621,11 @@ def test_a_client_that_is_not_the_checkouts_leaves_the_result_incomplete():
             "ANGLE (Intel, Intel(R) Arc(TM) A370M Graphics (0x00005693) Direct3D11 vs_5_0 "
             "ps_5_0, D3D11)",
             False,
+        ),
+        (
+            "Intel(R) UHD Graphics",
+            "ANGLE (Intel, Mesa Intel(R) UHD Graphics (TGL GT1), OpenGL ES 3.2)",
+            True,
         ),
         ("Intel(R) UHD Graphics", NVIDIA_CHROME, False),
         ("llvmpipe (LLVM 15.0.7, 256 bits)", NVIDIA_CHROME, False),
