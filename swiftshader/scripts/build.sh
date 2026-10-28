@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the binaries of world-engine-swiftshader from pinned sources, inside the
-# manylinux_2_28 image of this machine's architecture, and put them in
+# manylinux_2_28 image of this machine's architecture (pinned by digest in sources.env),
+# and put them in
 # src/world_engine_swiftshader/lib/:
 #
 #   libvulkan.so.1           the Khronos Vulkan loader (Vulkan-Loader, $VULKAN_SDK)
@@ -8,7 +9,8 @@
 #                            backend Subzero on x86_64, LLVM 10 on aarch64 (Subzero has no
 #                            AArch64 backend)
 #   vk_swiftshader_icd.json  its ICD manifest, library_path relative ("./libvk_swiftshader.so")
-#   build_info.json          sources, backend, compiler, sizes, SHA-256, newest GLIBC symbol
+#   build_info.json          sources, build image (reference and ID), backend, compiler,
+#                            sizes, SHA-256, newest GLIBC symbol
 #
 # libstdc++ and libgcc are linked statically (SwiftShader's version script exports only the
 # vk* symbols, so they never meet the host process's copies); the result needs glibc 2.28.
@@ -19,18 +21,20 @@
 #
 # WORK_DIR (default: a new temporary directory) receives the source trees and the build.
 # SWIFTSHADER_SRC=<dir> uses a SwiftShader tree already checked out at $SWIFTSHADER_COMMIT.
+# MANYLINUX_IMAGE=<image> builds in another image (a development build; build_info.json
+# says which).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 source "$HERE/sources.env"
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64) BACKEND=Subzero ;;
-  aarch64) BACKEND=LLVM ;;
+  x86_64) BACKEND=Subzero; PINNED=$MANYLINUX_X86_64 ;;
+  aarch64) BACKEND=LLVM; PINNED=$MANYLINUX_AARCH64 ;;
   *) echo "world-engine-swiftshader is built for x86_64 and aarch64, not $ARCH" >&2; exit 2 ;;
 esac
 WORK=${1:-$(mktemp -d)}
 JOBS=${2:-$(nproc)}
-IMAGE=${MANYLINUX_IMAGE:-quay.io/pypa/manylinux_2_28_${ARCH}:latest}
+IMAGE=${MANYLINUX_IMAGE:-$PINNED}
 OUT="$HERE/src/world_engine_swiftshader/lib"
 mkdir -p "$WORK/src" "$WORK/out" "$OUT"
 
@@ -54,6 +58,8 @@ fi
 fetch https://github.com/KhronosGroup/Vulkan-Headers.git "$VULKAN_SDK" "$WORK/src/Vulkan-Headers"
 fetch https://github.com/KhronosGroup/Vulkan-Loader.git "$VULKAN_SDK" "$WORK/src/Vulkan-Loader"
 
+docker image inspect "$IMAGE" > /dev/null 2>&1 || docker pull -q "$IMAGE" > /dev/null
+IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE")
 docker run --rm -e BACKEND="$BACKEND" -e JOBS="$JOBS" -e HOST_UID="$(id -u)" \
   -v "$SWS":/sws:ro -v "$WORK/src":/src:ro -v "$WORK/out":/out "$IMAGE" bash -c '
 set -euo pipefail
@@ -100,7 +106,8 @@ EOF
 python3 - "$WORK/out/lib/build_info.part.json" "$OUT/build_info.json" "$ARCH" <<EOF
 import json, sys
 info = json.load(open(sys.argv[1]))
-info.update({"arch": sys.argv[3], "swiftshader": "$SWIFTSHADER_COMMIT", "vulkan_sdk": "$VULKAN_SDK", "image": "$IMAGE"})
+info.update({"arch": sys.argv[3], "swiftshader": "$SWIFTSHADER_COMMIT", "vulkan_sdk": "$VULKAN_SDK",
+             "image": "$IMAGE", "image_id": "$IMAGE_ID"})
 json.dump(info, open(sys.argv[2], "w"), indent=1)
 EOF
 for f in libvulkan.so.1 libvk_swiftshader.so vk_swiftshader_icd.json; do cp "$WORK/out/lib/$f" "$OUT/$f"; done
