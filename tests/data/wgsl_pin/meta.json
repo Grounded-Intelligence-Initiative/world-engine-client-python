@@ -1,0 +1,55 @@
+{
+ "engine_commit": "ca8d7b1023b7c01e34b8f67474ee8e562fed9e3d",
+ "pipeline": "wgsl/1",
+ "rule": "per image, at most one value in 5000 (at least 2) off by 1, none by more",
+ "variants": {
+  "hdri": {
+   "color_format": "rgba32float",
+   "images": [
+    "hdri_0_front.png",
+    "hdri_0_low.png",
+    "hdri_0_side.png",
+    "hdri_1_front.png",
+    "hdri_1_low.png",
+    "hdri_1_side.png"
+   ],
+   "lighting": "hdri"
+  },
+  "parts": {
+   "color_format": "rgba32float",
+   "images": [
+    "parts_0_front.png",
+    "parts_0_low.png",
+    "parts_0_side.png",
+    "parts_1_front.png",
+    "parts_1_low.png",
+    "parts_1_side.png"
+   ],
+   "lighting": "scene"
+  },
+  "scene": {
+   "color_format": "rgba32float",
+   "images": [
+    "scene_0_front.png",
+    "scene_0_low.png",
+    "scene_0_side.png",
+    "scene_1_front.png",
+    "scene_1_low.png",
+    "scene_1_side.png"
+   ],
+   "lighting": "scene"
+  },
+  "studio": {
+   "color_format": "rgba32float",
+   "images": [
+    "studio_0_front.png",
+    "studio_0_low.png",
+    "studio_0_side.png",
+    "studio_1_front.png",
+    "studio_1_low.png",
+    "studio_1_side.png"
+   ],
+   "lighting": "studio"
+  }
+ }
+}
