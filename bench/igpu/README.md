@@ -165,9 +165,10 @@ page). Both rendered twice the same. Renderer D against Spark there: room200k
 1.629/255, r2_400k 0.402/255.
 
 The same bench there, 2026-10-28, three rounds (render only, three 256×256
-cameras of r2_400k; only GPU0 visible; the machine, a Threadripper PRO
-5975WX, was shared, with a load average of 16 to 35 and a peak of 130). The
-CPU rows force Chrome onto its SwiftShader
+cameras of r2_400k; only GPU0 visible). The machine, a Threadripper PRO
+5975WX with 64 threads, was shared: the load average at the start of a run
+was 5 to 34 for the RTX 4090 rows, 17 to 46 for lavapipe and 18 to 87 for
+SwiftShader. The CPU rows force Chrome onto its SwiftShader
 (`--chrome-args "--headless=new --use-angle=swiftshader --enable-unsafe-swiftshader --no-sandbox"`)
 and renderer D onto a CPU adapter (`--adapter software`; for the bundled
 SwiftShader also `--d-env VK_ICD_FILENAMES=/nonexistent/none.json`, which
@@ -175,16 +176,17 @@ hides lavapipe):
 
 | renderer D on | D, steps/s | Chrome, steps/s | D / Chrome | D rgba8unorm | room200k: D vs 4090 D | D vs Spark | Chrome (JPEG) vs Spark | Spark here vs 4090 Spark |
 |---|---|---|---|---|---|---|---|---|
-| RTX 4090 (Chrome: the 4090 through ANGLE GL ES) | 194.7 (193.2–194.9) | 18.26 (18.19–18.43) | 10.7 | 209.4 | 0.000 | 1.629 | 2.607 | 0.000 |
-| lavapipe (Chrome: its SwiftShader) | 2.88 (2.83–3.00) | 0.083 (0.071–0.093) | 34.7 | 2.97 | 0.071 | 1.630 | 2.855 | 1.487 |
-| bundled SwiftShader (Chrome: its SwiftShader) | 0.81 (0.80–0.92) | 0.080 (0.055–0.090) | 10.1 | 0.93 | 0.070 | 1.631 | 2.855 | 1.487 |
+| RTX 4090 (Chrome: the 4090 through ANGLE GL ES) | 192.0 (188.8–197.2) | 17.44 (17.38–17.49) | 11.0 | 210.8 | 0.000 | 1.629 | 2.607 | 0.000 |
+| lavapipe (Chrome: its SwiftShader) | 3.06 (2.46–3.17) | 0.081 (0.075–0.089) | 37.8 | 3.05 | 0.071 | 1.630 | 2.855 | 1.487 |
+| bundled SwiftShader (Chrome: its SwiftShader) | 0.92 (0.91–0.92) | 0.078 (0.076–0.080) | 11.8 | 0.91 | 0.070 | 1.631 | 2.855 | 1.487 |
 
-Medians over the rounds, ranges in brackets; the quality columns are the
-mean |difference| over the five room200k reference images, in 1/255. Every
-check passed on all three. Renderer D's images were the same in every round
-on each adapter, and so were the browser path's. One rgba8unorm run on the
-bundled SwiftShader took 25 s a frame while the machine's load reached 130;
-its other two ran at 0.93 and 1.01 steps/s.
+Medians over the rounds, ranges in brackets; D / Chrome is the ratio of the
+medians. The quality columns are the mean |difference| over the five room200k
+reference images, in 1/255. Every check passed on all three. Renderer D's
+images were the same in every round on each adapter, and so were the browser
+path's. A run two hours earlier, with the same measuring code (its records
+kept less: no load average), gave the same quality numbers and a D / Chrome
+of 10.7, 34.7 and 10.1.
 
 ## Files
 
