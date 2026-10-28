@@ -456,7 +456,7 @@ class RemoteEnv:
                 d_failure = exc
                 warnings.warn(
                     "renderer D found no GPU or software adapter that renders here, so camera "
-                    f"images come from headless Chrome instead, which is slower ({exc.args[0]})",
+                    f"images come from headless Chrome instead, which is slower ({exc.reason})",
                     RuntimeWarning,
                     stacklevel=4,
                 )
@@ -465,10 +465,13 @@ class RemoteEnv:
         except RendererError as exc:
             if d_failure is None:
                 raise
+            fixes = list(dict.fromkeys([*d_failure.fixes, *exc.fixes]))
+            fixes.sort(key=lambda fix: "images=False" in fix)  # the state-only way out last
             raise NoRenderAdapter(
-                f"nothing renders camera images here: renderer D: {d_failure.args[0]} | "
-                f"headless Chrome: {exc.args[0]}",
+                f"nothing renders camera images here. Renderer D: {d_failure.reason}. "
+                f"Headless Chrome: {exc.reason}",
                 code="renderer_unavailable",
+                fixes=fixes,
             ) from exc
 
     def _heartbeat(self):

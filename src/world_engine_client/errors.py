@@ -9,9 +9,11 @@ from __future__ import annotations
 
 
 class WorldEngineClientError(RuntimeError):
-    """Base error; carries the server error code when one exists."""
+    """Base error; carries the server error code when one exists. ``reason`` is
+    the message without the fixes, ``fixes`` the list of them."""
 
     def __init__(self, message: str, *, code: str | None = None, fixes: list[str] | None = None):
+        self.reason, self.fixes = message, list(fixes or [])
         if fixes:
             message += "\n  Possible fixes:\n" + "\n".join(
                 f"    {i + 1}. {f}" for i, f in enumerate(fixes)

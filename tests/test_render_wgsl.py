@@ -177,7 +177,10 @@ def no_adapter(**kw):
     raise render_wgsl.NoRenderAdapter(
         "no GPU or software adapter renders camera images here",
         code="renderer_unavailable",
-        fixes=["apt install libvulkan1 mesa-vulkan-drivers"],
+        fixes=[
+            "apt install libvulkan1 mesa-vulkan-drivers",
+            "or pass images=False for a state-only session",
+        ],
     )
 
 
@@ -205,7 +208,9 @@ def test_when_nothing_renders_the_error_names_the_fixes(stub, chrome, monkeypatc
     class NoChrome(FakeChrome):
         def __init__(self, *a, **k):
             raise wec.RendererError(
-                "no Chrome or Chromium to render with", code="renderer_unavailable"
+                "no Chrome or Chromium to render with",
+                code="renderer_unavailable",
+                fixes=["python -m playwright install chromium"],
             )
 
     monkeypatch.setattr(render_module, "LocalRenderer", NoChrome)
@@ -215,8 +220,17 @@ def test_when_nothing_renders_the_error_names_the_fixes(stub, chrome, monkeypatc
         with pytest.raises(render_wgsl.NoRenderAdapter) as caught:
             wec.connect("secret", url=stub.url, images=True, access_provider=lambda: "scoped")
     text = str(caught.value)
-    assert "renderer D" in text and "headless Chrome" in text
+    assert "Renderer D: no GPU" in text and "Headless Chrome: no Chrome" in text
     assert caught.value.code == "renderer_unavailable"
+    # Both renderers' fixes, once, in one list after the reasons; the
+    # state-only way out last.
+    assert caught.value.fixes == [
+        "apt install libvulkan1 mesa-vulkan-drivers",
+        "python -m playwright install chromium",
+        "or pass images=False for a state-only session",
+    ]
+    assert text.count("Possible fixes") == 1
+    assert text.endswith("3. or pass images=False for a state-only session")
     assert stub.paths()[-1] == "/control/release", "the controller is let go"
 
 
