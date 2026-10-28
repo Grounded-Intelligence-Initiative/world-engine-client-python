@@ -15,11 +15,11 @@ and a summary against the thresholds of README.md.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import platform
 import shlex
+import shutil
 import statistics
 import subprocess
 import sys
@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import machine  # noqa: E402
-import scene  # noqa: E402
+import page  # noqa: E402
 
 FORMAT = 1
 PATHS = {
@@ -61,19 +61,6 @@ def gpu_class(text: str | None) -> str | None:
         if any(w in t for w in words):
             return vendor
     return None
-
-
-def page_manifest() -> dict:
-    """The capture page this bench carries, checked against its manifest."""
-    manifest = json.loads((scene.CAPTURE_PAGE / "MANIFEST.json").read_text())
-    bad = []
-    for name, want in manifest["files"].items():
-        data = (scene.CAPTURE_PAGE / name).read_bytes()
-        if hashlib.sha256(data).hexdigest() != want:
-            bad.append(name)
-    if bad:
-        raise SystemExit(f"capture_page/ does not match MANIFEST.json: {bad}")
-    return manifest
 
 
 def round_order(keys: list[str], rnd: int) -> list[str]:
@@ -295,6 +282,13 @@ def main(argv: list[str] | None = None) -> int:
         "same build on every machine (default); auto: an installed Google Chrome first",
     )
     ap.add_argument(
+        "--capture-page",
+        default=None,
+        metavar="DIR|ZIP",
+        help="the engine's capture page for the browser path: its directory or "
+        f"igpu-capture-page-<commit>.zip (default {page.ENV}, else capture_page/)",
+    )
+    ap.add_argument(
         "--chrome-args", default=None, help="Chrome's flags, one string (default: the client's)"
     )
     ap.add_argument(
@@ -320,6 +314,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-lossless", action="store_true", help="skip the PNG run of the browser path"
     )
     ap.add_argument("--no-images", action="store_true", help="keep no images of the runs")
+    ap.add_argument(
+        "--keep-cache",
+        action="store_true",
+        help="keep the run's temporary directory (render cache, capture page) at the end",
+    )
     ap.add_argument("--label", default="", help="free text for the result, e.g. the machine")
     ap.add_argument(
         "--out", default=None, help="the result file (default igpu_bench_<host>_<time>.json)"
@@ -339,92 +338,108 @@ def main(argv: list[str] | None = None) -> int:
     unknown = [k for k in keys if k not in PATHS]
     if unknown:
         ap.error(f"unknown paths {unknown}; known: {list(PATHS)}")
+    needs_page = any(PATHS[k]["path"] == "chrome" for k in keys)
+    where = page.locate(a.capture_page) if needs_page else None
+    if needs_page and where is None:
+        ap.error(page.missing())
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = Path(a.out or f"igpu_bench_{platform.node() or 'host'}_{stamp}.json").resolve()
     images = None if a.no_images else out.with_name(out.stem + "_images")
     adapter = a.adapter or os.environ.get("WE_RENDER_ADAPTER") or "auto"
     d_env = dict(kv.split("=", 1) for kv in a.d_env)
     chrome_args = shlex.split(a.chrome_args) if a.chrome_args else None
-
-    print(f"[bench] collecting machine information -> {out}", flush=True)
-    result: dict = {
-        "bench": "igpu",
-        "format": FORMAT,
-        "label": a.label,
-        "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "argv": sys.argv[1:] if argv is None else argv,
-        "config": {
-            "paths": keys,
-            "rounds": a.rounds,
+    # The render cache (the scenes' assets, the page's files) and the page
+    # taken from a zip: one temporary directory, removed at the end.
+    work = Path(tempfile.mkdtemp(prefix="igpu-bench-"))
+    try:
+        if needs_page:
+            page_dir, page_record = page.load(where, work / "capture_page")
+        else:
+            page_dir, page_record = None, {"needed": False}
+        print(f"[bench] collecting machine information -> {out}", flush=True)
+        result: dict = {
+            "bench": "igpu",
+            "format": FORMAT,
+            "label": a.label,
+            "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "argv": sys.argv[1:] if argv is None else argv,
+            "config": {
+                "paths": keys,
+                "rounds": a.rounds,
+                "adapter": adapter,
+                "browser": a.browser,
+                "chrome_args": chrome_args,
+                "allow_software": not a.no_software,
+                "d_env": d_env,
+                "steps": a.steps,
+                "min_steps": a.min_steps,
+                "max_seconds": a.max_seconds,
+                "warmup_seconds": a.warmup_seconds,
+                "thresholds": THRESHOLDS,
+            },
+            "capture_page": page_record,
+            "machine": machine.collect(),
+            "runs": [],
+        }
+        for ad in result["machine"].get("gpus", {}).get("wgpu_adapters") or []:
+            if isinstance(ad, dict):
+                print(
+                    f"[bench] wgpu adapter: {ad.get('device')} ({ad.get('adapter_type')}, "
+                    f"{ad.get('backend_type')}) {ad.get('description') or ''}",
+                    flush=True,
+                )
+        base = {
             "adapter": adapter,
-            "browser": a.browser,
             "chrome_args": chrome_args,
             "allow_software": not a.no_software,
-            "d_env": d_env,
             "steps": a.steps,
             "min_steps": a.min_steps,
             "max_seconds": a.max_seconds,
             "warmup_seconds": a.warmup_seconds,
-            "thresholds": THRESHOLDS,
-        },
-        "capture_page": page_manifest(),
-        "machine": machine.collect(),
-        "runs": [],
-    }
-    for ad in result["machine"]["gpus"].get("wgpu_adapters") or []:
-        if isinstance(ad, dict):
-            print(
-                f"[bench] wgpu adapter: {ad.get('device')} ({ad.get('adapter_type')}, "
-                f"{ad.get('backend_type')}) {ad.get('description') or ''}",
-                flush=True,
-            )
-    cache_dir = tempfile.mkdtemp(prefix="igpu-bench-render-cache-")
-    base = {
-        "adapter": adapter,
-        "chrome_args": chrome_args,
-        "allow_software": not a.no_software,
-        "steps": a.steps,
-        "min_steps": a.min_steps,
-        "max_seconds": a.max_seconds,
-        "warmup_seconds": a.warmup_seconds,
-        "cache_dir": cache_dir,
-    }
-
-    def launch(key: str, spec: dict, rnd: int, slot: int) -> dict:
-        env = dict(os.environ)
-        if spec["path"] == "d":
-            env.update(d_env)
-        else:
-            env["WE_RENDER_BROWSER"] = a.browser
-        if images is not None:
-            spec["images_dir"] = str(images / f"round{rnd}_{key}")
-        record = run_worker(spec, env, a.run_timeout)
-        record.update(key=key, round=rnd, slot=slot)
-        print(f"[bench] round {rnd}, " + one_line(record), flush=True)
-        result["runs"].append(record)
-        out.write_text(json.dumps(result, indent=1, default=str))  # what there is so far
-        return record
-
-    for rnd in range(1, a.rounds + 1):
-        for slot, key in enumerate(round_order(keys, rnd)):
-            launch(key, {**base, **PATHS[key], "timed": True}, rnd, slot)
-    if "chrome" in keys and not a.no_lossless:
-        spec = {
-            **base,
-            **PATHS["chrome"],
-            "label": "browser path, PNG readback (quality only)",
-            "lossless": True,
-            "timed": False,
+            "cache_dir": str(work / "render-cache"),
+            "capture_page": str(page_dir) if page_dir is not None else None,
         }
-        launch("chrome_png", spec, 0, 0)
 
-    result["summary"] = summarize(result["runs"])
-    result["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    out.write_text(json.dumps(result, indent=1, default=str))
-    print(f"[bench] wrote {out}", flush=True)
-    for c in result["summary"]["checks"]:
-        verdict = {True: "pass", False: "FAIL", None: "n/a"}[c["pass"]]
-        print(f"[bench] {verdict}: {c['name']}: {c['value']}", flush=True)
+        def launch(key: str, spec: dict, rnd: int, slot: int) -> dict:
+            env = dict(os.environ)
+            if spec["path"] == "d":
+                env.update(d_env)
+            else:
+                env["WE_RENDER_BROWSER"] = a.browser
+            if images is not None:
+                spec["images_dir"] = str(images / f"round{rnd}_{key}")
+            record = run_worker(spec, env, a.run_timeout)
+            record.update(key=key, round=rnd, slot=slot)
+            print(f"[bench] round {rnd}, " + one_line(record), flush=True)
+            result["runs"].append(record)
+            out.write_text(json.dumps(result, indent=1, default=str))  # what there is so far
+            return record
+
+        for rnd in range(1, a.rounds + 1):
+            for slot, key in enumerate(round_order(keys, rnd)):
+                launch(key, {**base, **PATHS[key], "timed": True}, rnd, slot)
+        if "chrome" in keys and not a.no_lossless:
+            spec = {
+                **base,
+                **PATHS["chrome"],
+                "label": "browser path, PNG readback (quality only)",
+                "lossless": True,
+                "timed": False,
+            }
+            launch("chrome_png", spec, 0, 0)
+
+        result["summary"] = summarize(result["runs"])
+        result["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        out.write_text(json.dumps(result, indent=1, default=str))
+        print(f"[bench] wrote {out}", flush=True)
+        for c in result["summary"]["checks"]:
+            verdict = {True: "pass", False: "FAIL", None: "n/a"}[c["pass"]]
+            print(f"[bench] {verdict}: {c['name']}: {c['value']}", flush=True)
+    finally:
+        if a.keep_cache:
+            print(f"[bench] kept {work}", flush=True)
+        else:
+            shutil.rmtree(work, ignore_errors=True)
     return 0
 
 

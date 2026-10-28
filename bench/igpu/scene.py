@@ -259,8 +259,9 @@ PNG_ENCODE = (b'convertToBlob({type:"image/jpeg",quality:s})', b'convertToBlob({
 
 class Server:
     """``fetch(path, headers)`` for both renderers: the splat, and the capture
-    page (``/index.html``, ``/assets/...``) from ``page_dir``. ``lossless``
-    serves the page with PNG in place of its JPEG encoding (same pixels as a
+    page (``/index.html``, ``/assets/...``) from ``page_dir``, a directory
+    that page.load checked (the browser path's runs only). ``lossless`` serves
+    the page with PNG in place of its JPEG encoding (same pixels as a
     readback), for the Spark reference."""
 
     def __init__(

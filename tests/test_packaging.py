@@ -29,8 +29,8 @@ def test_metadata_agrees_with_itself():
 
 
 def test_the_bench_stays_out_of_the_package():
-    """bench/igpu carries a capture page build and reference images: the
-    repository's, not the wheel's or the sdist's."""
+    """bench/igpu carries a trace and reference images: the repository's,
+    not the wheel's or the sdist's."""
     hatch = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["hatch"]["build"]
     assert hatch["targets"]["wheel"]["packages"] == ["src/world_engine_client"]
     assert "bench" in hatch["targets"]["sdist"]["exclude"]

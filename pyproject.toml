@@ -59,8 +59,8 @@ packages = ["src/world_engine_client"]
 
 [tool.hatch.build.targets.sdist]
 # world-engine-swiftshader is its own package (swiftshader/, publish-swiftshader.yml);
-# bench/ is a tool of the repository (the integrated-GPU bench and the capture
-# page build it carries), not part of the package.
+# bench/ is a tool of the repository (the integrated-GPU bench, its trace and
+# reference images), not part of the package.
 exclude = ["swiftshader", "bench"]
 
 [tool.ruff]

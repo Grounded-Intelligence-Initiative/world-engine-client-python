@@ -3,8 +3,8 @@
     python worker.py SPEC_JSON OUT_JSON
 
 SPEC_JSON names the path (``d``: renderer D through WGSLRenderer; ``chrome``:
-the browser path through LocalRenderer, the capture page from this
-directory), its options and the time limits. The run times r2_400k (the
+the browser path through LocalRenderer, with the capture page that run.py
+checked, ``capture_page``), its options and the time limits. The run times r2_400k (the
 trace's warm-up states, then the timed ones), then renders the reference
 states of r2_400k and room200k and compares them with the RTX 4090
 references. OUT_JSON gets one record: the adapter, the speed, the quality
@@ -64,7 +64,8 @@ def refs(name: str) -> dict:
 
 def open_renderer(spec: dict, name: str, cache_dir: str):
     """The renderer of the run's path for scene ``name``, and the server stand-in."""
-    server = scene.Server(name, lossless=bool(spec.get("lossless")))
+    page_dir = spec.get("capture_page") or scene.CAPTURE_PAGE  # the browser path's only
+    server = scene.Server(name, page_dir=page_dir, lossless=bool(spec.get("lossless")))
     scene_init, states, warmup = scene.trace(name)
     if spec["path"] == "d":
         from world_engine_client.render_wgsl import WGSLRenderer

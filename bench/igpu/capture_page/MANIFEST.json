@@ -1,5 +1,6 @@
 {
  "what": "the engine's capture page (frontend/index.html), production build: the page the browser path runs",
+ "where": "not in this repository (the engine's is private): a directory with these files, or igpu-capture-page-1af5543.zip from pack_capture_page.py; the bench takes either with --capture-page (page.py) and checks every file here",
  "engine_commit": "1af55436f89b6d49fe3356587d0628495e1d73a3",
  "engine_commit_note": "world-engine at the parent repo's main 3aac2de (production on 2026-10-28)",
  "build": "npm run build (tsc -b && vite build), mode production",

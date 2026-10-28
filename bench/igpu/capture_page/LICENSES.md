@@ -1,8 +1,9 @@
-# Licences of capture_page/
+# Licences of the capture page build
 
-`capture_page/` is a build of the World Engine frontend's capture page (see
-MANIFEST.json for the commit and the build). The engine's own code is under
-Apache-2.0, like this repository. The build bundles two libraries under the MIT
+The bench's browser-path runs serve a build of the World Engine frontend's
+capture page (MANIFEST.json names the engine commit, the build and its
+files). The build is not part of this repository; pack_capture_page.py puts
+this file into its zip. The build bundles two libraries under the MIT
 licence, whose notices follow.
 
 ## three.js 0.180.0

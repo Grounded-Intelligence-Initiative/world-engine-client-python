@@ -1,12 +1,13 @@
 """Make the bench's reference images; they were made on an RTX 4090 and are
 committed in refs/. Run again only to replace them, on an RTX 4090:
 
-    python bench/igpu/make_refs.py [--force]
+    python bench/igpu/make_refs.py --capture-page DIR|ZIP [--force]
 
 For each scene: renderer D with its default colour target (rgba16float on a
-GPU), and Spark through the capture page with its JPEG encoding replaced by
-PNG (the same pixels as a readback). Each is rendered twice, in two renderers,
-and must come out the same both times. refs/refs.json records what made them.
+GPU), and Spark through the capture page (page.py: the engine's build, from
+outside this repository) with its JPEG encoding replaced by PNG (the same
+pixels as a readback). Each is rendered twice, in two renderers, and must come
+out the same both times. refs/refs.json records what made them.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ sys.path.insert(0, str(HERE))
 
 import compare  # noqa: E402
 import machine  # noqa: E402
+import page  # noqa: E402
 import worker  # noqa: E402
 
 
@@ -39,12 +41,30 @@ def render(spec: dict, name: str, cache_dir: str) -> tuple[dict, dict]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--force", action="store_true", help="on another GPU than an RTX 4090")
+    ap.add_argument("--capture-page", default=None, metavar="DIR|ZIP", help="as run.py's (page.py)")
     a = ap.parse_args()
+    where = page.locate(a.capture_page)
+    if where is None:
+        ap.error(page.missing())
     os.environ["WE_RENDER_BROWSER"] = "shell"  # the pinned headless shell, not a local Chrome
-    cache_dir = tempfile.mkdtemp(prefix="igpu-refs-cache-")
+    work = Path(tempfile.mkdtemp(prefix="igpu-refs-"))
+    try:
+        return make(a, where, work)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def make(a, where: Path, work: Path) -> int:
+    page_dir, _ = page.load(where, work / "capture_page")
+    cache_dir = str(work / "render-cache")
     sets = {
         "d_rgba16float_rtx4090": {"path": "d", "label": "renderer D", "adapter": "auto"},
-        "spark_rtx4090": {"path": "chrome", "label": "Spark, PNG", "lossless": True},
+        "spark_rtx4090": {
+            "path": "chrome",
+            "label": "Spark, PNG",
+            "lossless": True,
+            "capture_page": str(page_dir),
+        },
     }
     record: dict = {"made": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "images": worker.REF_IMAGES}
     found = machine.collect()  # what made them, without paths or the host's name

@@ -11,7 +11,8 @@ extra; the development machine has none, so the bench is portable: macOS
 It needs no engine and no network after the first run: the scenes are made on
 the machine, byte for byte the same everywhere, and a local stand-in of a
 server's `/render/` route hands both renderers the same assets and the same
-capture page.
+capture page. The capture page is the engine's build, which is not in this
+repository (see "The capture page" below).
 
 ## What runs
 
@@ -54,9 +55,21 @@ The browser path uses the headless shell of the playwright that the `render`
 extra pins (Chrome Headless Shell 148), downloaded once into
 `<user cache dir>/digiarena/browsers` on the first run, so every machine runs
 the same browser build. `--browser auto` uses an installed Google Chrome first,
-as the client does by default. `capture_page/` is the engine's capture page,
-built from engine commit 1af5543 (production on 2026-10-28; see
-`MANIFEST.json`, checked at start).
+as the client does by default.
+
+## The capture page
+
+The browser path runs the engine's capture page: a production build of the
+World Engine frontend at engine commit 1af5543 (production on 2026-10-28),
+`index.html` and the two scripts it loads. The engine's repository is
+private, so the build is not committed here: `capture_page/MANIFEST.json`
+names its files and their SHA-256, and the bench checks every file before a
+run. It takes the build as a directory or as the zip
+`igpu-capture-page-1af5543.zip` (1.9 MB), from `--capture-page DIR|ZIP`, the
+environment variable `IGPU_BENCH_CAPTURE_PAGE`, or `capture_page/` itself
+(git ignores the build there). `pack_capture_page.py <engine>/frontend/dist`
+makes the zip from an engine checkout built at that commit
+(`npm run build`). Runs of renderer D alone (`--paths d`) need no page.
 
 ## Install and run
 
@@ -70,7 +83,7 @@ python -m venv bench-venv && . bench-venv/bin/activate   # Windows: bench-venv\S
 pip install 'world-engine-client[render]'
 git clone https://github.com/Grounded-Intelligence-Initiative/world-engine-client-python
 cd world-engine-client-python
-python bench/igpu/run.py --label "M4 Pro, on power"
+python bench/igpu/run.py --capture-page ~/Downloads/igpu-capture-page-1af5543.zip --label "M4 Pro, on power"
 ```
 
 On Linux the headless shell may need Chromium's system libraries once:
@@ -78,7 +91,10 @@ On Linux the headless shell may need Chromium's system libraries once:
 
 It takes 5 to 15 minutes on a GPU. It prints each run's adapter, speed and
 quality, and writes `igpu_bench_<host>_<time>.json` (`--out` names it) and the
-images of every run next to it (`--no-images` keeps none). Send the JSON.
+images of every run next to it (`--no-images` keeps none). Send the JSON. The
+render cache of the runs (about 80 MB: the scenes in plaintext, the page) is
+in a temporary directory that the bench removes at the end (`--keep-cache`
+keeps it).
 
 ## Making both paths use the integrated GPU
 
@@ -192,9 +208,12 @@ of 10.7, 34.7 and 10.1.
 
 - `run.py`: the bench. `worker.py`: one run. `scene.py`: the scenes, the
   trace, the `/render/` stand-in. `compare.py`: the image numbers.
-  `machine.py`: the machine. `make_refs.py`: makes `refs/` again (on an RTX
-  4090 only).
+  `machine.py`: the machine. `page.py`: finds and checks the capture page.
+  `pack_capture_page.py`: makes its zip. `make_refs.py`: makes `refs/` again
+  (on an RTX 4090 only).
 - `trace/`: `scene_init.json`, `states.jsonl`, `meta.json`.
 - `refs/<scene>/{d_rgba16float_rtx4090,spark_rtx4090}/`: the reference
   images; `refs/refs.json` says what made them.
-- `capture_page/`: the capture page build, `MANIFEST.json`, `LICENSES.md`.
+- `capture_page/`: `MANIFEST.json` (the build's files and their SHA-256) and
+  `LICENSES.md` (the notices of the libraries the build bundles; the zip
+  carries both).

@@ -1,7 +1,9 @@
 """The integrated-GPU bench (bench/igpu): its scenes are the same bytes on every
-machine, its capture page and references are the ones it says, its numbers
-and checks follow README.md, and renderer D here draws what it drew on the RTX
-4090 (that one needs wgpu and an adapter; it is skipped without one)."""
+machine, its references are the ones it says, the engine's capture page comes
+from outside the repository and is checked, its numbers and checks follow
+README.md, and renderer D here draws what it drew on the RTX 4090 (that one
+needs wgpu and an adapter; it is skipped without one). The real capture page
+is used where IGPU_BENCH_CAPTURE_PAGE names it; elsewhere a stand-in."""
 
 from __future__ import annotations
 
@@ -10,7 +12,9 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import warnings
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +26,8 @@ if not BENCH.is_dir():  # an sdist: the bench is the repository's only
 sys.path.insert(0, str(BENCH))
 
 import compare  # noqa: E402
+import pack_capture_page  # noqa: E402
+import page  # noqa: E402
 import run  # noqa: E402
 import scene  # noqa: E402
 import worker  # noqa: E402
@@ -74,18 +80,128 @@ def test_the_trace_is_splat_only():
     assert "wrist" in moving
 
 
-def test_the_capture_page_is_the_one_its_manifest_names():
-    manifest = run.page_manifest()  # raises when a file differs
-    assert set(manifest["files"]) == {
+def fake_page(root: Path) -> dict:
+    """A stand-in capture page build in ``root``, and its manifest."""
+    files = {
+        "index.html": b'<script type="module" src="/assets/main-T3st.js"></script>',
+        "assets/main-T3st.js": b"let b=await c." + scene.PNG_ENCODE[0] + b";send(b)",
+        "assets/scene-T3st.js": b"export const splats = 1;",
+    }
+    for name, data in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(data)
+    digests = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
+    return {"engine_commit": "f00d" * 10, "build_stamp": {"mode": "production"}, "files": digests}
+
+
+def test_the_manifest_names_one_production_build():
+    m = page.manifest()
+    assert set(m["files"]) == {
         "index.html",
         "assets/main-C0ZK_nJr.js",
         "assets/sceneEnvironment-BecPG80m.js",
     }
-    assert manifest["build_stamp"]["mode"] == "production" and len(manifest["engine_commit"]) == 40
-    html = (scene.CAPTURE_PAGE / "index.html").read_text()
-    for name in manifest["files"]:
+    assert m["build_stamp"]["mode"] == "production" and len(m["engine_commit"]) == 40
+    assert page.archive_name(m) == "igpu-capture-page-1af5543.zip"
+
+
+def test_the_engine_build_is_not_in_the_repository():
+    """The capture page is the build of the engine, whose repository is
+    private: only its manifest and notes are committed, and git ignores the
+    build where page.py would find it."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(BENCH), "ls-files", "capture_page"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except OSError:
+        pytest.skip("no git here")
+    if done.returncode != 0:
+        pytest.skip("not a git checkout")
+    tracked = set(done.stdout.split())
+    assert tracked <= {
+        "capture_page/.gitattributes",
+        "capture_page/LICENSES.md",
+        "capture_page/MANIFEST.json",
+    }, tracked
+    assert "capture_page/MANIFEST.json" in tracked
+    for name in ("capture_page/index.html", "capture_page/assets/main-C0ZK_nJr.js"):
+        ignored = subprocess.run(["git", "-C", str(BENCH), "check-ignore", "-q", name])
+        assert ignored.returncode == 0, f"git does not ignore {name}"
+
+
+def test_a_capture_page_is_taken_from_a_directory_or_a_zip_and_checked(tmp_path):
+    src = tmp_path / "dist"
+    m = fake_page(src)
+    got, record = page.load(src, tmp_path / "unused", m)
+    assert got == src and record["kind"] == "directory" and record["files"] == m["files"]
+    assert not (tmp_path / "unused").exists(), "a directory is used where it is"
+    for prefix in ("", "capture_page/"):  # the zip of pack_capture_page, or of a folder
+        archive = tmp_path / f"page{len(prefix)}.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            for name in m["files"]:
+                z.write(src / name, prefix + name)
+            z.writestr("../outside.js", b"not a manifest file")
+        dest = tmp_path / f"out{len(prefix)}"
+        got, record = page.load(archive, dest, m)
+        assert got == dest and record["kind"] == "zip"
+        assert sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()) == (
+            sorted(m["files"])
+        ), "only the manifest's files, under its names"
+        assert not (tmp_path / "outside.js").exists()
+    (src / "assets" / "scene-T3st.js").write_bytes(b"export const splats = 2;")
+    with pytest.raises(SystemExit, match="scene-T3st.js"):
+        page.load(src, tmp_path / "x", m)
+    with pytest.raises(SystemExit, match="neither a directory nor a zip"):
+        page.load(tmp_path / "missing.zip", tmp_path / "x", m)
+
+
+def test_the_zip_packs_the_same_bytes_and_the_bench_takes_it(tmp_path):
+    m = fake_page(tmp_path / "dist")
+    notes = tmp_path / "LICENSES.md"
+    notes.write_text("notes")
+    a, b = tmp_path / "a.zip", tmp_path / "b.zip"
+    digest = pack_capture_page.pack(tmp_path / "dist", a, m, extra={"LICENSES.md": notes})
+    assert pack_capture_page.pack(tmp_path / "dist", b, m, extra={"LICENSES.md": notes}) == digest
+    assert a.read_bytes() == b.read_bytes()
+    got, record = page.load(a, tmp_path / "page", m)
+    assert record["kind"] == "zip" and (got / "assets" / "main-T3st.js").is_file()
+    assert "LICENSES.md" in zipfile.ZipFile(a).namelist()
+
+
+def test_without_a_capture_page_the_bench_says_where_to_get_one(monkeypatch, capsys):
+    monkeypatch.delenv(page.ENV, raising=False)
+    monkeypatch.setattr(page, "DEFAULT", Path(tempfile.gettempdir()) / "no-page-here")
+    with pytest.raises(SystemExit) as stop:
+        run.main(["--paths", "d,chrome", "--rounds", "1"])
+    assert stop.value.code == 2
+    err = capsys.readouterr().err
+    assert "--capture-page" in err and "igpu-capture-page-1af5543.zip" in err
+    assert "pack_capture_page.py" in err and "--paths d" in err
+
+
+@pytest.fixture
+def real_page(tmp_path):
+    """The engine's capture page where this machine has it (IGPU_BENCH_CAPTURE_PAGE),
+    checked against the manifest."""
+    where = page.locate()
+    if where is None:
+        pytest.skip(f"no capture page here ({page.ENV} names none)")
+    return page.load(where, tmp_path / "real-page")
+
+
+def test_the_capture_page_here_is_the_one_its_manifest_names(real_page):
+    page_dir, record = real_page
+    html = (page_dir / "index.html").read_text()
+    for name in record["files"]:
         if name.startswith("assets/"):
             assert f'"/{name}"' in html
+    main = next(n for n in record["files"] if "main-" in n)
+    plain = scene.Server("r2_400k", page_dir=page_dir)("/" + main).read()
+    png = scene.Server("r2_400k", page_dir=page_dir, lossless=True)("/" + main).read()
+    assert plain.count(scene.PNG_ENCODE[0]) == 1 and png.count(scene.PNG_ENCODE[1]) == 1
 
 
 def test_the_references_are_there():
@@ -109,26 +225,55 @@ def _key(folder: str) -> str:
     return next(k for k, v in worker.REF_SETS.items() if v == folder)
 
 
-def test_the_stand_in_serves_ranges_and_only_its_files():
-    server = scene.Server("r2_400k")
+def test_the_stand_in_serves_ranges_and_only_its_files(tmp_path):
+    fake_page(tmp_path / "page")
+    (tmp_path / "secret.txt").write_text("not the page's")
+    server = scene.Server("r2_400k", page_dir=tmp_path / "page")
     with server(scene.SPLAT_URL, {"Range": "bytes=10-"}) as part:
         assert part.status == 206
         assert part.getheader("Content-Range") == f"bytes 10-22400361/{22400362}"
         assert part.read() == scene.splat("r2_400k")[10:]
-    with server("/index.html") as page:
-        assert b"/assets/main-" in page.read()
-    for path in ("/assets/../../README.md", "/__key", "/assets/missing.js"):
+    with server("/index.html") as index:
+        assert b"/assets/main-" in index.read()
+    for path in ("/assets/../../secret.txt", "/__key", "/assets/missing.js"):
         with pytest.raises(FileNotFoundError):
             server(path)
 
 
-def test_the_lossless_page_encodes_png_in_place_of_jpeg():
-    name = next(n for n in run.page_manifest()["files"] if "main-" in n)
-    plain = scene.Server("r2_400k")("/" + name).read()
-    png = scene.Server("r2_400k", lossless=True)("/" + name).read()
+def test_the_lossless_page_encodes_png_in_place_of_jpeg(tmp_path):
+    fake_page(tmp_path / "page")
+    name = "/assets/main-T3st.js"
+    plain = scene.Server("r2_400k", page_dir=tmp_path / "page")(name).read()
+    png = scene.Server("r2_400k", page_dir=tmp_path / "page", lossless=True)(name).read()
     assert scene.PNG_ENCODE[0] in plain and scene.PNG_ENCODE[0] not in png
     assert png.count(scene.PNG_ENCODE[1]) == 1
     assert png.replace(scene.PNG_ENCODE[1], scene.PNG_ENCODE[0]) == plain
+    twice = tmp_path / "page" / "assets" / "main-Tw1ce.js"
+    twice.write_bytes(scene.PNG_ENCODE[0] * 2)
+    with pytest.raises(SystemExit, match="not there once"):
+        scene.Server("r2_400k", page_dir=tmp_path / "page", lossless=True)("/assets/main-Tw1ce.js")
+
+
+def test_a_run_leaves_no_temporary_directory_unless_asked(tmp_path, monkeypatch):
+    """The render cache (the scenes' plaintext PLYs, the page's files, about
+    80 MB) and a capture page taken from a zip go into one temporary
+    directory, removed at the end; --keep-cache keeps it."""
+    monkeypatch.setattr(run.machine, "collect", lambda: {"gpus": {}})
+    caches = []
+
+    def fake_worker(spec, env, timeout):
+        caches.append(Path(spec["cache_dir"]))
+        caches[-1].mkdir(parents=True, exist_ok=True)
+        (caches[-1] / "scene.ply").write_bytes(b"plaintext")
+        return {"path": spec["path"], "label": spec["label"], "ok": False, "error": {"type": "X"}}
+
+    monkeypatch.setattr(run, "run_worker", fake_worker)
+    argv = ["--paths", "d", "--rounds", "1", "--no-images", "--out", str(tmp_path / "r.json")]
+    assert run.main(argv) == 0
+    assert len(caches) == 1 and not caches[0].exists(), "the render cache is gone"
+    assert not list(Path(tempfile.gettempdir()).glob("igpu-bench-*")), "and its directory"
+    assert run.main([*argv, "--keep-cache"]) == 0
+    assert caches[1].exists(), "--keep-cache keeps it"
 
 
 # --------------------------------------------------------------- the numbers
