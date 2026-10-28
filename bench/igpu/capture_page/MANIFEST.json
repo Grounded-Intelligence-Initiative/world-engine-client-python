@@ -1,0 +1,20 @@
+{
+ "what": "the engine's capture page (frontend/index.html), production build: the page the browser path runs",
+ "engine_commit": "1af55436f89b6d49fe3356587d0628495e1d73a3",
+ "engine_commit_note": "world-engine at the parent repo's main 3aac2de (production on 2026-10-28)",
+ "build": "npm run build (tsc -b && vite build), mode production",
+ "build_stamp": {
+  "sources_sha256": "e9ac98b2f07b10f755d683a5e4cd12f9bb96f3b65f37afb34eddeb777cab8dcb",
+  "mode": "production"
+ },
+ "node": "v22.23.1",
+ "npm": "10.9.8",
+ "three": "0.180.0",
+ "spark": "@sparkjsdev/spark 2.1.0",
+ "kept": "index.html and the two scripts it loads; the editor, the viewer, fonts and the HDRI loaders are left out",
+ "files": {
+  "assets/main-C0ZK_nJr.js": "c0c3fdd48408aefe167c54f02dc9b688e2ecae121b5d894a5c90eb1317c774af",
+  "assets/sceneEnvironment-BecPG80m.js": "b36ddc0b8ef06ff4654e705887c6e40d90b5766c822077986942b57e766a86f8",
+  "index.html": "2d5353ed32f9c6d9d96e9692720059d3d7cb5b0949c2f7580db0a2a65ad3ba38"
+ }
+}

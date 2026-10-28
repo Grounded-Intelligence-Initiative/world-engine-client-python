@@ -1,0 +1,2 @@
+# A build: no line diffs, and not counted as source.
+assets/*.js -diff linguist-generated

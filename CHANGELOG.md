@@ -28,6 +28,9 @@
 - `WE_RENDER_BROWSER=chrome` or `WE_RENDER_BROWSER=shell` makes the browser
   path use only an installed Google Chrome or only the headless shell.
   `info["render"]` of the browser path names the browser and its version.
+- `bench/igpu/` in the repository (not in the package or the sdist): a
+  portable bench of renderer D against the browser path, for integrated GPUs
+  on macOS, Linux and Windows. See its README.
 
 ## 0.6.0
 

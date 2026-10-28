@@ -30,7 +30,7 @@ jobs:
           .venv/bin/python src/world_engine_client/wgsl/_probe.py --pick hardware --out probe.json
           cat probe.json
       - name: the client draws on the GPU
-        run: .venv/bin/python -m pytest tests/test_render_wgsl.py tests/test_wgsl_vendored.py
+        run: .venv/bin/python -m pytest tests/test_render_wgsl.py tests/test_wgsl_vendored.py tests/test_bench_igpu.py
         env:
           WE_TEST_REQUIRE_WGSL: "1"
           WE_TEST_EXPECT_ADAPTER: system

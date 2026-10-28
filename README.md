@@ -404,6 +404,10 @@ shell in your `<user cache dir>/digiarena/browsers` (or `DIGIARENA_BROWSERS_DIR`
 and never download one; `WE_RENDER_BROWSER=shell` makes them use it rather than
 an installed Google Chrome.
 
+`bench/igpu/` (see its README) times renderer D against the browser path on
+this machine's GPU and compares their images with an RTX 4090's: the bench for
+integrated GPUs, which neither CI nor the development machine has.
+
 `tests/test_render_wgsl.py` draws a small scene with renderer D through
 `connect()`, on whatever adapter the machine has; it is skipped without one,
 and `WE_TEST_REQUIRE_WGSL=1` makes it fail instead.
