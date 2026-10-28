@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "world-engine-swiftshader"
+version = "0.1.0"
+description = "SwiftShader (CPU Vulkan) and the Khronos Vulkan loader, for world-engine-client on Linux machines without a GPU."
+readme = "README.md"
+requires-python = ">=3.11"
+# SwiftShader, marl, SPIRV-Tools, astc-encoder and the Vulkan loader: Apache-2.0;
+# Subzero (x86_64) NCSA; LLVM 10 (aarch64) Apache-2.0 WITH LLVM-exception plus
+# NCSA; SPIRV-Headers and cJSON MIT. Texts in world_engine_swiftshader/licenses.
+license = { text = "Apache-2.0 AND MIT AND NCSA AND Apache-2.0 WITH LLVM-exception" }
+authors = [{ name = "Xiatao Sun", email = "sunxiatao@gmail.com" }]
+keywords = ["vulkan", "swiftshader", "software-rendering", "wgpu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Grounded-Intelligence-Initiative/world-engine-client-python"
+Repository = "https://github.com/Grounded-Intelligence-Initiative/world-engine-client-python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/world_engine_swiftshader"]
+# Built by scripts/build.sh, not in git.
+artifacts = ["src/world_engine_swiftshader/lib/*"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"

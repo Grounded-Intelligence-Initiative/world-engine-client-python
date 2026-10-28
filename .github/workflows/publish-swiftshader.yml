@@ -1,0 +1,99 @@
+# Build world-engine-swiftshader (swiftshader/) for Linux x86_64 and aarch64 and
+# publish it to PyPI with Trusted Publishing (OIDC; no API token is stored).
+#
+# Trigger: pushing a tag swiftshader-v<version> (e.g. swiftshader-v0.1.0); the tag
+# must name the version in swiftshader/pyproject.toml. world-engine-client's own
+# releases are tags v<version> (publish.yml); the two never match each other.
+# workflow_dispatch builds and checks the wheels without publishing.
+#
+# PyPI: the project world-engine-swiftshader has a pending publisher for this
+# repository, this workflow file (publish-swiftshader.yml) and the GitHub
+# environment "pypi". Renaming any of them breaks publishing until pypi.org is
+# changed to match.
+#
+# Each wheel is built natively (aarch64 on GitHub's arm64 runner, no emulation)
+# in the manylinux_2_28 image from the pinned sources (swiftshader/sources.env),
+# checked (tag, files, SHA-256, glibc, licences, size) and made to render through
+# world-engine-client's adapter probe before anything is published. Then the
+# render extra's install size is checked against design doc 16's limits.
+name: publish-swiftshader
+
+on:
+  push:
+    tags: ["swiftshader-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-24.04, max_mb: "4"}
+          - {arch: aarch64, runner: ubuntu-24.04-arm, max_mb: "9"}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: the tag names this version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          WANT=$(python -c "import tomllib; print(tomllib.load(open('swiftshader/pyproject.toml', 'rb'))['project']['version'])")
+          test "${GITHUB_REF_NAME#swiftshader-v}" = "$WANT" || { echo "tag $GITHUB_REF_NAME, package $WANT"; exit 1; }
+      - name: build SwiftShader and the Vulkan loader
+        run: swiftshader/scripts/build.sh "$RUNNER_TEMP/sws" "$(nproc)"
+      - run: pip install build && python -m build --wheel swiftshader -o dist
+      - run: pip install "wgpu==0.32.0" numpy
+      - name: check the wheel and render with it
+        run: python swiftshader/scripts/check_wheel.py dist/*.whl --max-mb ${{ matrix.max_mb }} --render --out check-${{ matrix.arch }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.arch }}
+          path: dist/*.whl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: check-${{ matrix.arch }}
+          path: check-${{ matrix.arch }}.json
+
+  size:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - run: pip install uv
+      - name: the render extra stays within 15 MB (x86_64) and 17 MB (aarch64)
+        run: python scripts/render_size.py --wheel-dir dist --check --json render-size.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: render-size
+          path: render-size.json
+
+  publish:
+    needs: [build, size]
+    if: startsWith(github.ref, 'refs/tags/swiftshader-v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # OIDC for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
