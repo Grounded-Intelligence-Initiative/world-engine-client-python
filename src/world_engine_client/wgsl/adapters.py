@@ -47,7 +47,7 @@ from pathlib import Path
 
 PROBE = Path(__file__).resolve().with_name("_probe.py")
 NATIVE = ("Vulkan", "Metal", "D3D12")
-HARDWARE = ("DiscreteGPU", "IntegratedGPU")
+HARDWARE = ("DiscreteGPU", "IntegratedGPU", "VirtualGPU")  # as _probe.HARDWARE
 # One control step is 0.034 s (task book §2.1 item 3): below this many steps a
 # second, rendering cannot keep up with real time.
 REAL_TIME_STEPS = 1.0 / 0.034
@@ -572,7 +572,8 @@ def _from_current(prefer: str, allow_software: bool):
     first = "IntegratedGPU" if prefer in ("low-power", "integrated") else "DiscreteGPU"
     hw = sorted(
         (a for a in ads if a.info.get("adapter_type") in HARDWARE),
-        key=lambda a: a.info.get("adapter_type") != first,
+        key=lambda a: (a.info.get("adapter_type") != first)
+        + (a.info.get("adapter_type") == "VirtualGPU"),
     )
     sw = [a for a in ads if a.info.get("adapter_type") == "CPU"]
     pool = ([] if prefer == "software" else hw) + (sw if allow_software else [])

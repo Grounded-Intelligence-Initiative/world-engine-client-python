@@ -94,7 +94,8 @@ mesh is in front; 1.7/255 in the splat region). `render_options={"renderer":
 for a scene `wgsl/1` cannot draw (an HDRI, a SuperSplat compressed PLY, a mesh
 that is not a GLB) and says why; the client warns once with that reason.
 
-Which adapter draws: a GPU first, then a software one. On Linux the client
+Which adapter draws: a GPU first (a discrete one, an integrated one, then a
+virtual GPU of a VM or a cloud), then a software one. On Linux the client
 tries the system's Vulkan loader with the GPU's driver, the bundled loader with
 the system's drivers (a container that has the NVIDIA driver but no
 libvulkan1), Mesa's lavapipe (`apt install mesa-vulkan-drivers`), and last the

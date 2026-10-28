@@ -44,7 +44,10 @@ import time
 import traceback
 
 NATIVE = ("Vulkan", "Metal", "D3D12")
-HARDWARE = ("DiscreteGPU", "IntegratedGPU")
+# GPUs, in the order they are taken: the preferred kind of physical GPU, the
+# other kind, then a virtual GPU (a VM's or a cloud's, often backed by a real
+# one), all before any CPU adapter.
+HARDWARE = ("DiscreteGPU", "IntegratedGPU", "VirtualGPU")
 MiB = 1 << 20
 DEFAULT_LIMITS = {
     "max-storage-buffer-binding-size": 128 * MiB,
@@ -235,12 +238,20 @@ def use_sys_path(paths) -> None:
     sys.path[:] = given + [p for p in sys.path if p not in given]
 
 
+def hardware_rank(adapter_type, first: str) -> int:
+    """0 for the preferred kind of GPU, 1 for the other physical kind, 2 for a
+    virtual GPU (see HARDWARE)."""
+    if adapter_type == first:
+        return 0
+    return 2 if adapter_type == "VirtualGPU" else 1
+
+
 def candidates(adapters, kind: str, prefer: str) -> list:
     ads = [a for a in adapters if a.info.get("backend_type") in NATIVE]
     if kind == "hardware":
         hw = [a for a in ads if a.info.get("adapter_type") in HARDWARE]
         first = "IntegratedGPU" if prefer == "integrated" else "DiscreteGPU"
-        return sorted(hw, key=lambda a: a.info.get("adapter_type") != first)
+        return sorted(hw, key=lambda a: hardware_rank(a.info.get("adapter_type"), first))
     if kind == "software":
         return [a for a in ads if a.info.get("adapter_type") == "CPU"]
     if kind.startswith("name:"):

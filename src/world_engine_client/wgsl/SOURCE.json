@@ -1,7 +1,7 @@
 {
   "comment": "Copied by scripts/sync_wgsl.py from the engine repository; change these files there, not here.",
   "pipeline": "wgsl/1",
-  "engine_commit": "d5deb6b5d842893af2fb3fc52b5965ef6b226d9f",
+  "engine_commit": "ffa5c0deb866e039c72745c34b0bafb5950614ea",
   "files": {
     "README.md": {
       "source": "frontend/src/render/wgsl/README.md",
@@ -13,11 +13,11 @@
     },
     "_probe.py": {
       "source": "world_engine/renderer/wgsl/_probe.py",
-      "sha256": "d3d5312e7fe619fbc0c35414e2c964008de8a5ec7cbd69f6060d3e30170f8f64"
+      "sha256": "e3fad0e6b2d5b8f4e729dafc5f9683af5cc4287e003356cc2d59b2d3fe4cb343"
     },
     "adapters.py": {
       "source": "world_engine/renderer/wgsl/adapters.py",
-      "sha256": "6338928b9c4572f9210c87ee3cd44b16dc57d148a2bf89ae01aca5dd7bccd56a"
+      "sha256": "98985c8018dc6092c1f15d36c7a469f38d58104d3ee67925a10d90856f1abefb"
     },
     "budget.py": {
       "source": "world_engine/renderer/wgsl/budget.py",
