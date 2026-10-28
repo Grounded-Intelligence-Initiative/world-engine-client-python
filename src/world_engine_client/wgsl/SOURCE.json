@@ -1,11 +1,11 @@
 {
   "comment": "Copied by scripts/sync_wgsl.py from the engine repository; change these files there, not here.",
   "pipeline": "wgsl/1",
-  "engine_commit": "63dfe3c7c84a21827b26ec28a2ba744f28973a1c",
+  "engine_commit": "33995ae3606fcf480019830e7bd8dd9605936ad9",
   "files": {
     "README.md": {
       "source": "frontend/src/render/wgsl/README.md",
-      "sha256": "8db65a43c2be7d5e21000efc31c487327c5ce680f6e8a9604f27b2b74092a881"
+      "sha256": "dd8197e3acf1e6a3d5df98adf794866af3636579833c33c5b153f71fc187eb30"
     },
     "__init__.py": {
       "source": "world_engine/renderer/wgsl/__init__.py",
@@ -13,11 +13,11 @@
     },
     "_probe.py": {
       "source": "world_engine/renderer/wgsl/_probe.py",
-      "sha256": "e3fad0e6b2d5b8f4e729dafc5f9683af5cc4287e003356cc2d59b2d3fe4cb343"
+      "sha256": "ae05619fc4d83c64cfa12d1b4f48ac2fe8b0f5dfae6f8176647739721229051f"
     },
     "adapters.py": {
       "source": "world_engine/renderer/wgsl/adapters.py",
-      "sha256": "98985c8018dc6092c1f15d36c7a469f38d58104d3ee67925a10d90856f1abefb"
+      "sha256": "90b3a9311883f1cd4ba7cf7cfdc3026e932d0418f5be4543f847bb9e8bb824dd"
     },
     "budget.py": {
       "source": "world_engine/renderer/wgsl/budget.py",
@@ -25,7 +25,7 @@
     },
     "common.wgsl": {
       "source": "frontend/src/render/wgsl/common.wgsl",
-      "sha256": "ff5616bf5b8f7859c5a443309c3b651e06d39810e39add341dc4dbf473f80a44"
+      "sha256": "e24caecf65e70c556de3e178c0a25fd905affa295f98038925b27063831de9da"
     },
     "cubeuv.wgsl": {
       "source": "frontend/src/render/wgsl/cubeuv.wgsl",
@@ -49,7 +49,7 @@
     },
     "mesh_pass.py": {
       "source": "world_engine/renderer/wgsl/mesh_pass.py",
-      "sha256": "dd5208a6b4f7cf4a5d4bd04f269cc30b81baf7874813094f6257830396b8e016"
+      "sha256": "497bee7502bf849fbe8a2234c9236c01c558beea64b7fa5873ef0a1c71ac28d1"
     },
     "pipeline.json": {
       "source": "frontend/src/render/wgsl/pipeline.json",
@@ -65,7 +65,7 @@
     },
     "render_wgsl.py": {
       "source": "world_engine/renderer/wgsl/render_wgsl.py",
-      "sha256": "cf3397452a12dfb2df5506fc7f19c4a0c31033436cf9a305983b3e7cb98c6b12"
+      "sha256": "3d8e044a18b979c6afdaab2971b3cc685a54ff780f6bceea63f09c8bd3fabc6e"
     },
     "resolve.wgsl": {
       "source": "frontend/src/render/wgsl/resolve.wgsl",
@@ -77,7 +77,7 @@
     },
     "sort.wgsl": {
       "source": "frontend/src/render/wgsl/sort.wgsl",
-      "sha256": "eda70bf818910fed36bc414b623190add93dc4757e363de8bb7e8df68762e551"
+      "sha256": "852ebf6d0fb78851e0615e459f1662e83adab0c52431a378f56372e514b8cc97"
     },
     "splat.wgsl": {
       "source": "frontend/src/render/wgsl/splat.wgsl",

@@ -215,21 +215,26 @@ fn project_splat(cam: Camera, P: Params, mean: vec3f, c0: vec3f, c1: vec3f, opac
 }
 
 // Workgroup prefix sums (Hillis-Steele over the 256 invocations). Call from
-// uniform control flow; every invocation must call it.
-var<workgroup> wg_scan_buf: array<u32, 256>;
+// uniform control flow; every invocation must call it. The words are a struct
+// member: FXC (D3D12) zero-initialises those 16 bytes at a time (see sort.wgsl).
+struct ScanWords {
+  w: array<u32, 256>,
+};
+
+var<workgroup> wg_scan_buf: ScanWords;
 
 fn wg_inclusive_scan(lid: u32, value: u32) -> u32 {
-  wg_scan_buf[lid] = value;
+  wg_scan_buf.w[lid] = value;
   workgroupBarrier();
   var acc = value;
   for (var off = 1u; off < WG; off = off << 1u) {
     var add = 0u;
     if (lid >= off) {
-      add = wg_scan_buf[lid - off];
+      add = wg_scan_buf.w[lid - off];
     }
     workgroupBarrier();
     acc = acc + add;
-    wg_scan_buf[lid] = acc;
+    wg_scan_buf.w[lid] = acc;
     workgroupBarrier();
   }
   return acc;
@@ -245,5 +250,5 @@ fn wg_inclusive_scan(lid: u32, value: u32) -> u32 {
 // writes the result of invocation 248. A value read from workgroup memory at a
 // uniform address is uniform, so that store is right everywhere.
 fn wg_scan_total() -> u32 {
-  return wg_scan_buf[WG - 1u];
+  return wg_scan_buf.w[WG - 1u];
 }

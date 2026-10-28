@@ -104,7 +104,7 @@ def test_the_test_scenes_wem1_is_what_the_engine_compiles():
 SHIPPED = {
     "wgsl/1": {
         "pipeline.json": "84675474229983334884ad838bb77df8675e356706e5ec1308ca61099558ad5a",
-        "common.wgsl": "ff5616bf5b8f7859c5a443309c3b651e06d39810e39add341dc4dbf473f80a44",
+        "common.wgsl": "e24caecf65e70c556de3e178c0a25fd905affa295f98038925b27063831de9da",
         "cubeuv.wgsl": "08b02f30a30756e46a673e9a18dd1f3ba09130fa8efa1d3a974bb3f62effe7a7",
         "material.wgsl": "9e900abef351a62bb58b4d0db6a812d07ec460ec508ee78d3003894d1b72df63",
         "mesh.wgsl": "218cab3d9351d67d374539367e5e4a9301462bd3012798f62f7647b3cec48be1",
@@ -112,7 +112,7 @@ SHIPPED = {
         "preprocess.wgsl": "2dbbdd1f9e6dfedaa9da9dfbc95e9c755987296b0d5d0cfe050c738782068644",
         "resolve.wgsl": "398064c223b93530d1556bf1928ddbd814b2ea73d6a94c56574ec567ecdda30c",
         "shadow.wgsl": "6d2a494c5c236ddd45a5da4294f2ece1b34265d05a1d9c676a2c9c7e76f37acc",
-        "sort.wgsl": "eda70bf818910fed36bc414b623190add93dc4757e363de8bb7e8df68762e551",
+        "sort.wgsl": "852ebf6d0fb78851e0615e459f1662e83adab0c52431a378f56372e514b8cc97",
         "splat.wgsl": "8abd95f2e2e3f8ba1058a18feca323fb20d873ca454122bbc357ba2e8fc58bde",
     }
 }

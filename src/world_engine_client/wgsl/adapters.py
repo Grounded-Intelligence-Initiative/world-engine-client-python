@@ -25,6 +25,13 @@ in the user's site-packages or on PYTHONPATH); the result can be cached
 set up for the step that rendered (the bundled loader preloaded, the bundled ICD
 named) before its own first enumeration, and opens that adapter.
 
+The probe checks that an adapter computes and draws, not that every pipeline of
+renderer D builds on it. An adapter D then fails on (a shader its backend's
+compiler rejects, a validation error) is reported with :func:`mark_failed`: the
+search passes over it from then on in this process, so it takes the next adapter
+in the order above (and caches that one), and :func:`open_adapter` opens that
+one when the process's wgpu instance has it.
+
 Everything here uses only the standard library until :func:`open_adapter`
 imports wgpu. It imports nothing from the engine or from world-engine-client
 (world-engine-client ships a copy of this directory).
@@ -92,6 +99,10 @@ _ICD_DIRS = (
 _warned: set[str] = set()
 # The choice this module opened the process's wgpu instance with (see open_adapter).
 _process_choice: AdapterChoice | None = None
+# Adapters renderer D failed on in this process ((device, backend, adapter type) ->
+# why), which the search and open_adapter pass over (see mark_failed).
+_failed: dict[tuple[str, str, str], str] = {}
+PASSED_OVER = "passed over: renderer D failed on it in this process"  # as _probe.PASSED_OVER
 
 
 class NoAdapterError(RuntimeError):
@@ -127,6 +138,28 @@ class AdapterChoice:
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+def _key(device, backend, adapter_type) -> tuple[str, str, str]:
+    return (str(device or ""), str(backend or ""), str(adapter_type or ""))
+
+
+def mark_failed(choice: AdapterChoice, why: str) -> None:
+    """Renderer D cannot draw with this adapter (its pipelines do not build
+    there: a shader the backend's compiler rejects, a validation error). From
+    now on in this process, search() and open_adapter() pass it over, so the
+    next one in the search order is taken; the probes report it as passed over.
+    The choice the search then makes is the one it caches."""
+    _failed[_key(choice.device, choice.backend, choice.adapter_type)] = why
+
+
+def failed(choice: AdapterChoice) -> str | None:
+    """Why renderer D failed on this adapter in this process, or None."""
+    return _failed.get(_key(choice.device, choice.backend, choice.adapter_type))
+
+
+def _failed_info(info) -> str | None:
+    return _failed.get(_key(info.get("device"), info.get("backend_type"), info.get("adapter_type")))
 
 
 def bundled_swiftshader() -> tuple[str, str] | None:
@@ -245,6 +278,8 @@ def run_probe(options: dict, timeout: float = PROBE_TIMEOUT) -> dict:
     for k in ("pick", "prefer", "preload", "icd"):
         if options.get(k):
             cmd += [f"--{k}", str(options[k])]
+    if options.get("skip"):
+        cmd += ["--skip", json.dumps(options["skip"])]
     env = dict(os.environ)
     if options.get("icd"):
         env.pop("VK_ADD_DRIVER_FILES", None)
@@ -386,17 +421,27 @@ def search(
     prefer: ``auto`` (discrete GPU, then integrated, then software),
     ``low-power`` (integrated first), ``software`` (skip the GPU steps) or
     ``name:SUBSTR`` (only an adapter whose name contains SUBSTR, no software
-    fallback). allow_software False stops after the GPU steps."""
+    fallback). allow_software False stops after the GPU steps. Adapters
+    renderer D failed on in this process (mark_failed) are passed over."""
     bundle = bundled_swiftshader()
     key = _fingerprint(prefer, allow_software, bundle)
     hit = _read_cache(cache_file, key, bundle)
-    if hit is not None:
+    if hit is not None and not failed(hit):
         return hit
+    skip = [{"device": k[0], "backend_type": k[1], "adapter_type": k[2]} for k in _failed]
     trail: list[dict] = []
     t0 = time.monotonic()
     for step, opts in _steps(prefer, allow_software, bundle):
+        if skip:
+            opts = {**opts, "skip": skip}
         res = run_probe(opts, timeout)
         picked = (res.get("picked") or {}).get("adapter") or {}
+        if res.get("ok") and _failed_info(picked):  # a probe that does not know --skip
+            res = {
+                **res,
+                "ok": False,
+                "tried": [*res.get("tried", []), {"adapter": picked, "error": PASSED_OVER}],
+            }
         trail.append(
             {
                 "step": step,
@@ -448,10 +493,16 @@ def open_adapter(
 ):
     """Set up this process for ``choice`` (search() when None) and return
     ``(adapter, choice)``. When this process already has its wgpu instance,
-    nothing can be set up any more: the best adapter it can see is used, and
-    choice.step is "current". A cached choice that no longer opens is searched
-    for again. Raises NoAdapterError."""
+    nothing can be set up any more: ``choice``'s adapter when that instance
+    has it (the next one after mark_failed, say), else the best adapter it can
+    see, and choice.step is "current". A cached choice that no longer opens is
+    searched for again. Adapters renderer D failed on are passed over. Raises
+    NoAdapterError."""
     if instance_created():
+        if choice is not None and not failed(choice):
+            ad = _here(choice)
+            if ad is not None:
+                return ad, choice
         return _reuse(prefer, allow_software)
     kw = {"prefer": prefer, "allow_software": allow_software, "timeout": timeout}
     if choice is None:
@@ -475,7 +526,7 @@ def _reuse(prefer: str, allow_software: bool):
     the step it chose fits the request, that adapter again (with that step).
     Else the best adapter the instance sees, step "current"."""
     prev = _process_choice
-    fits = prev is not None and (allow_software or not prev.software)
+    fits = prev is not None and not failed(prev) and (allow_software or not prev.software)
     if fits:
         if prefer.startswith("name:"):
             fits = prefer[5:].lower() in prev.device.lower()
@@ -484,17 +535,31 @@ def _reuse(prefer: str, allow_software: bool):
         elif prefer in ("low-power", "integrated"):
             fits = prev.adapter_type == "IntegratedGPU"
     if fits:
-        import wgpu
+        ad = _here(prev)
+        if ad is not None:
+            return ad, AdapterChoice(**{**prev.as_dict(), "cached": True})
+    return _from_current(prefer, allow_software)
 
+
+def _here(choice: AdapterChoice):
+    """The adapter of ``choice`` in this process's wgpu instance, or None.
+    The process's choice from then on (_reuse takes it again)."""
+    global _process_choice
+    import wgpu
+
+    try:
         pool = (
             [wgpu.gpu.request_adapter_sync(force_fallback_adapter=True)]
-            if prev.pick == "fallback"
+            if choice.pick == "fallback"
             else wgpu.gpu.enumerate_adapters_sync()
         )
-        for ad in pool:
-            if ad is not None and _matches(ad, prev):
-                return ad, AdapterChoice(**{**prev.as_dict(), "cached": True})
-    return _from_current(prefer, allow_software)
+    except Exception:  # noqa: BLE001 - no fallback adapter on this platform
+        return None
+    for ad in pool:
+        if ad is not None and _matches(ad, choice):
+            _process_choice = choice
+            return ad
+    return None
 
 
 def _matches(ad, choice: AdapterChoice) -> bool:
@@ -562,10 +627,15 @@ def _open(choice: AdapterChoice):
 
 
 def _from_current(prefer: str, allow_software: bool):
-    """The best adapter of an instance this process created earlier."""
+    """The best adapter of an instance this process created earlier, passing
+    over those renderer D failed on."""
     import wgpu
 
-    ads = [a for a in wgpu.gpu.enumerate_adapters_sync() if a.info.get("backend_type") in NATIVE]
+    ads = [
+        a
+        for a in wgpu.gpu.enumerate_adapters_sync()
+        if a.info.get("backend_type") in NATIVE and not _failed_info(a.info)
+    ]
     name = prefer[5:].lower() if prefer.startswith("name:") else None
     if name:
         ads = [a for a in ads if name in (a.info.get("device") or "").lower()]
@@ -578,12 +648,14 @@ def _from_current(prefer: str, allow_software: bool):
     sw = [a for a in ads if a.info.get("adapter_type") == "CPU"]
     pool = ([] if prefer == "software" else hw) + (sw if allow_software else [])
     if not pool:
-        raise NoAdapterError(
-            "this process created its wgpu instance before the renderer started, and that "
-            "instance has no adapter the renderer can use",
-            no_adapter_fixes(bundled_swiftshader()),
-            [],
-        )
+        if _failed:
+            msg = "renderer D failed on every adapter this process can still open"
+        else:
+            msg = (
+                "this process created its wgpu instance before the renderer started, and "
+                "that instance has no adapter the renderer can use"
+            )
+        raise NoAdapterError(msg, no_adapter_fixes(bundled_swiftshader()), [])
     ad = pool[0]
     i = ad.info
     choice = AdapterChoice(
@@ -712,6 +784,11 @@ def warn_once(kind: str, message: str, stacklevel: int = 3) -> bool:
     _warned.add(kind)
     warnings.warn(message, RuntimeWarning, stacklevel=stacklevel)
     return True
+
+
+def mark_warned(kind: str) -> None:
+    """Count this kind as warned: another warning of the caller's said it."""
+    _warned.add(kind)
 
 
 class SpeedCheck:

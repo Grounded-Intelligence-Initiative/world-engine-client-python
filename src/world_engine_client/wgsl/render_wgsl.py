@@ -794,6 +794,7 @@ class SplatRenderer:
                 cams_buf=self.b_cams,
                 make_buffer=self._buffer,
             )
+            self.mesh.build_pipelines(self.color_format)
 
         # pipelines and bind groups
         self.kernels = ComputeKernels(dev, {m: sources[m] for m in ("preprocess", "sort", "splat")})

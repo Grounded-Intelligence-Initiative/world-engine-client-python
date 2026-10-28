@@ -7,6 +7,7 @@ nothing but wgpu and numpy:
 
     python -I -B _probe.py --out RESULT.json [--sys-path] [--preload LIBVULKAN]
         [--icd ICD.json] [--pick hardware|software|fallback|name:SUBSTR|...] [--prefer ...]
+        [--skip JSON]
 
 --sys-path read the module search path from stdin (a JSON list of strings) and
            search there first. ``-I`` leaves out PYTHONPATH and the user's
@@ -22,6 +23,9 @@ nothing but wgpu and numpy:
            those), fallback (request_adapter(force_fallback_adapter=True), WARP on
            Windows), name:SUBSTR (by device name)
 --prefer   among hardware adapters: discrete (default) or integrated first
+--skip     adapters to pass over, a JSON list of {"device", "backend_type",
+           "adapter_type"}: those renderer D failed on in the searching process
+           (adapters.mark_failed); "tried" lists each as passed over
 
 The result is written to --out as JSON, never to stdout: some Mesa builds print
 NIR there on a shader-cache miss. ``import_error`` in it says that wgpu or numpy
@@ -49,6 +53,7 @@ NATIVE = ("Vulkan", "Metal", "D3D12")
 # one), all before any CPU adapter.
 HARDWARE = ("DiscreteGPU", "IntegratedGPU", "VirtualGPU")
 MiB = 1 << 20
+PASSED_OVER = "passed over: renderer D failed on it in this process"  # as adapters.PASSED_OVER
 DEFAULT_LIMITS = {
     "max-storage-buffer-binding-size": 128 * MiB,
     "max-buffer-size": 256 * MiB,
@@ -260,6 +265,13 @@ def candidates(adapters, kind: str, prefer: str) -> list:
     raise ValueError(f"unknown kind {kind!r}")
 
 
+def passed_over(skip, adapter) -> bool:
+    """True when the searching process passes over this adapter (--skip)."""
+    i = adapter.info
+    me = (i.get("device"), i.get("backend_type"), i.get("adapter_type"))
+    return any((s.get("device"), s.get("backend_type"), s.get("adapter_type")) == me for s in skip)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -268,6 +280,7 @@ def main(argv=None) -> int:
     ap.add_argument("--pick", default="hardware")
     ap.add_argument("--prefer", default="discrete")
     ap.add_argument("--sys-path", action="store_true")
+    ap.add_argument("--skip", default="[]")
     a = ap.parse_args(argv)
     res: dict = {"python": sys.version.split()[0], "platform": sys.platform, "pick": a.pick}
     t0 = time.perf_counter()
@@ -297,6 +310,7 @@ def main(argv=None) -> int:
         adapters = wgpu.gpu.enumerate_adapters_sync()
         res["adapters"] = [info_of(x) for x in adapters]
         res["tried"] = []
+        skip = json.loads(a.skip)
         for kind in a.pick.split(","):
             if kind == "fallback":
                 try:
@@ -311,6 +325,9 @@ def main(argv=None) -> int:
                 found = candidates(adapters, kind, a.prefer)
             for ad in found:
                 entry = {"kind": kind, "adapter": info_of(ad)}
+                if passed_over(skip, ad):
+                    res["tried"].append({**entry, "ok": False, "error": PASSED_OVER})
+                    continue
                 try:
                     entry.update(verify(wgpu, np, ad))
                     entry["ok"] = True

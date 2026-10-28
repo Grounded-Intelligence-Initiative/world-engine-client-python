@@ -264,3 +264,14 @@ assume there is no NaN or Inf.
   dispatch: `preprocess.wgsl` declares the state twice, `state_rw` for
   `scan_groups` and read-only `state` for `project_sorted`.
 - Kernels with barriers never return early; work past a segment's end is masked.
+- D3D12 compiles these shaders with FXC (wgpu's default; DXC only when a host
+  asks for it), from the HLSL naga makes of them. FXC cannot write a private
+  vector or array at an index it does not know: it unrolls the loop around the
+  write to make the index constant, and fails (`X3500: array reference cannot
+  be used as an l-value`, `X3511: forced to unroll loop`). naga zero-initialises
+  workgroup memory from one invocation, and FXC's time for that grows faster
+  than the variable: keep each workgroup array small (`sort.wgsl` splits its
+  1024 words into four variables) and inside a struct, which FXC stores 16
+  bytes at a time. With naga 29.0.4 and d3dcompiler_47 (HLSL Shader Compiler
+  10.1), 2026-10-28, the 21 entry points compile in 5.5 s, 3.0 s of it
+  `sort_scatter`, which took 25 s when its 11 KiB were five word arrays.

@@ -767,6 +767,19 @@ class MeshPass:
             )
         return self._pipes[key]
 
+    def build_pipelines(self, color_format: str) -> None:
+        """Every pipeline draw() and prepare() can ask for in this scene, made
+        now: a backend that compiles a shader when its pipeline is made (D3D12
+        with FXC) then fails while the renderer is made, not at its first frame."""
+        for mi, _, _, _ in self.camera_draws:
+            m = self.scene.materials[mi]
+            self.pipeline("none" if m.side == "double" else "back", m.depth_write, color_format)
+        if self.shadows:
+            for cull, _, _ in self.shadow_draws:
+                self.shadow_pipeline(cull)
+            for cull, _, _, _ in self.masked_shadow_draws:
+                self.shadow_pipeline(cull, masked=True)
+
     def shadow_pipeline(self, cull: str, masked: bool = False):
         """Depth only; masked: alpha-tested casters (fs_shadow_masked discards
         below the material's alphaTest, the material's bind group in group 1)."""
