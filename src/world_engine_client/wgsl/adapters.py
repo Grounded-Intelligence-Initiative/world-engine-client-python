@@ -18,11 +18,12 @@ Metal. A browser path, where one is kept, comes after these; the caller decides.
 
 wgpu-py makes one wgpu instance per process at the first enumeration, and that
 instance keeps the Vulkan loader it loaded. So each step is probed in a
-subprocess (``_probe.py``), which renders a little the way the renderer does;
-the result can be cached (``cache_file``) against a fingerprint of the
-environment. Then this process is set up for the step that rendered (the
-bundled loader preloaded, the bundled ICD named) before its own first
-enumeration, and opens that adapter.
+subprocess (``_probe.py``), which renders a little the way the renderer does
+and imports wgpu and numpy from this process's sys.path (pip may have put them
+in the user's site-packages or on PYTHONPATH); the result can be cached
+(``cache_file``) against a fingerprint of the environment. Then this process is
+set up for the step that rendered (the bundled loader preloaded, the bundled ICD
+named) before its own first enumeration, and opens that adapter.
 
 Everything here uses only the standard library until :func:`open_adapter`
 imports wgpu. It imports nothing from the engine or from world-engine-client
@@ -68,6 +69,18 @@ _ENV_KEYS = (
     "XDG_DATA_DIRS",
     "XDG_DATA_HOME",
 )
+# Which files a cached choice may name, by step: (the bundled loader, the bundled
+# ICD). The cache is read back from disk, and _open loads the loader it names.
+_STEP_FILES = {
+    "system": (False, False),
+    "lavapipe": (False, False),
+    "warp": (False, False),
+    "bundled-loader": (True, False),
+    "swiftshader": (True, True),
+}
+# The NVIDIA kernel driver's version (its content: procfs gives the file a new
+# time whenever its inode is made again).
+_NVIDIA_VERSION = "/proc/driver/nvidia/version"
 _ICD_DIRS = (
     "/usr/share/vulkan/icd.d",
     "/usr/local/share/vulkan/icd.d",
@@ -132,6 +145,24 @@ def nvidia_present() -> bool:
     return os.path.exists("/dev/nvidiactl")
 
 
+def gpu_devices() -> list[str]:
+    """The GPU device nodes this machine shows (Linux): DRM render nodes,
+    NVIDIA's control device, WSL's /dev/dxg. A GPU can be there without a
+    Vulkan driver for it (no mesa-vulkan-drivers, a virtual GPU, an old one):
+    then the search ends on a software adapter while OpenGL, and a browser on
+    OpenGL, may still reach the GPU."""
+    if not sys.platform.startswith("linux"):
+        return []
+    found = []
+    try:
+        found += [
+            f"/dev/dri/{n}" for n in sorted(os.listdir("/dev/dri")) if n.startswith("renderD")
+        ]
+    except OSError:
+        pass
+    return found + [p for p in ("/dev/nvidiactl", "/dev/dxg") if os.path.exists(p)]
+
+
 def instance_created() -> bool:
     """True when this process already has its wgpu instance (and its loader)."""
     if "wgpu" not in sys.modules:
@@ -187,11 +218,30 @@ def _steps(prefer: str, allow_software: bool, bundle) -> list[tuple[str, dict]]:
     return steps
 
 
+def search_path() -> list[str]:
+    """This process's sys.path, for the probe: every entry absolute (an empty
+    one is the working directory, which the probe shares), each once."""
+    out: list[str] = []
+    for entry in sys.path:
+        try:
+            entry = os.fspath(entry)
+        except TypeError:
+            continue
+        if not isinstance(entry, str):
+            continue
+        entry = os.path.abspath(entry) if entry else os.getcwd()
+        if entry not in out:
+            out.append(entry)
+    return out
+
+
 def run_probe(options: dict, timeout: float = PROBE_TIMEOUT) -> dict:
-    """Run _probe.py once in a fresh interpreter; its JSON result, or an error."""
+    """Run _probe.py once in a fresh interpreter; its JSON result, or an error.
+    The probe starts isolated (-I) and searches modules where this process
+    does (its sys.path, on stdin)."""
     fd, out = tempfile.mkstemp(prefix="we_probe_", suffix=".json")
     os.close(fd)
-    cmd = [sys.executable, "-I", "-B", str(PROBE), "--out", out]
+    cmd = [sys.executable, "-I", "-B", str(PROBE), "--out", out, "--sys-path"]
     for k in ("pick", "prefer", "preload", "icd"):
         if options.get(k):
             cmd += [f"--{k}", str(options[k])]
@@ -201,7 +251,11 @@ def run_probe(options: dict, timeout: float = PROBE_TIMEOUT) -> dict:
     t = time.monotonic()
     try:
         done = subprocess.run(
-            cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout
+            cmd,
+            env=env,
+            input=json.dumps(search_path()).encode(),
+            capture_output=True,
+            timeout=timeout,
         )
         try:
             with open(out) as f:
@@ -250,9 +304,13 @@ def _fingerprint(prefer: str, allow_software: bool, bundle) -> str:
             parts.append(sorted((p.name, p.stat().st_mtime_ns) for p in Path(d).iterdir()))
         except OSError:
             parts.append(None)
+    parts.append(nvidia_present())
+    try:
+        with open(_NVIDIA_VERSION, "rb") as f:
+            parts.append(f.read(4096).decode("utf-8", "replace"))
+    except OSError:
+        parts.append(None)
     for p in (
-        "/dev/nvidiactl",
-        "/proc/driver/nvidia/version",
         "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
         "/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
         "/usr/lib64/libvulkan.so.1",
@@ -269,7 +327,16 @@ def _fingerprint(prefer: str, allow_software: bool, bundle) -> str:
     return hashlib.sha256(json.dumps(parts, default=str).encode()).hexdigest()
 
 
-def _read_cache(cache_file, key: str) -> AdapterChoice | None:
+def environment_key(prefer: str = "auto", allow_software: bool = True) -> str:
+    """The fingerprint the search caches its result under (see _fingerprint):
+    a caller can keep what it learns about this environment by the same key."""
+    return _fingerprint(prefer, allow_software, bundled_swiftshader())
+
+
+def _read_cache(cache_file, key: str, bundle) -> AdapterChoice | None:
+    """The cached choice for this environment, or None. A choice that names a
+    loader or an ICD other than the installed bundle's (search() writes no
+    other) is not used: _open would load it."""
     if not cache_file:
         return None
     try:
@@ -279,6 +346,15 @@ def _read_cache(cache_file, key: str) -> AdapterChoice | None:
             return None
         choice = AdapterChoice(**rec["choice"])
     except (OSError, ValueError, TypeError, KeyError):
+        return None
+    files = _STEP_FILES.get(choice.step)
+    loader, icd = bundle or (None, None)
+    if files is None or (choice.loader, choice.icd) != (
+        loader if files[0] else None,
+        icd if files[1] else None,
+    ):
+        return None
+    if files[0] and not loader:
         return None
     choice.cached = True
     return choice
@@ -313,7 +389,7 @@ def search(
     fallback). allow_software False stops after the GPU steps."""
     bundle = bundled_swiftshader()
     key = _fingerprint(prefer, allow_software, bundle)
-    hit = _read_cache(cache_file, key)
+    hit = _read_cache(cache_file, key, bundle)
     if hit is not None:
         return hit
     trail: list[dict] = []
@@ -335,6 +411,7 @@ def search(
                 )
                 or None,
                 "seconds": res.get("subprocess_s"),
+                "import_error": res.get("import_error"),
             }
         )
         if res.get("ok"):
@@ -354,6 +431,9 @@ def search(
             )
             _write_cache(cache_file, key, choice)
             return choice
+    if trail and all(t.get("import_error") for t in trail):
+        # Not a driver problem: the probe never looked at an adapter.
+        raise NoAdapterError(probe_import_message(trail), probe_import_fixes(), trail)
     raise NoAdapterError(no_adapter_message(trail), no_adapter_fixes(bundle), trail)
 
 
@@ -526,6 +606,23 @@ def no_adapter_message(trail: list[dict]) -> str:
     return f"no GPU or software adapter renders camera images here ({tried})"
 
 
+def probe_import_message(trail: list[dict]) -> str:
+    return (
+        f"the adapter probe, {sys.executable} in a subprocess with this process's module "
+        f"search path, cannot import what renderer D needs ({trail[0]['import_error']}), so "
+        "no adapter was looked at"
+    )
+
+
+def probe_import_fixes() -> list[str]:
+    return [
+        f"install wgpu and numpy as regular packages of {sys.executable}: "
+        f"{sys.executable} -m pip install wgpu numpy (the probe does not see modules that "
+        "only an import hook of this process finds)",
+        "or pass images=False for a state-only session",
+    ]
+
+
 def no_adapter_fixes(bundle) -> list[str]:
     if sys.platform == "win32":
         return [
@@ -566,14 +663,32 @@ def nvidia_hint() -> str:
 
 
 def software_message(choice: AdapterChoice) -> str:
-    msg = (
-        f"no hardware GPU for camera images: rendering on the CPU with {choice.label}. "
-        "Expect a step or two per second on real scenes; pass images=False for a "
+    seen = gpu_devices()
+    nvidia = nvidia_present()
+    if seen:
+        msg = (
+            f"Vulkan reaches no GPU here, though this machine shows {', '.join(seen[:3])}: "
+            f"rendering camera images on the CPU with {choice.label}"
+        )
+    else:
+        msg = f"no GPU for camera images: rendering on the CPU with {choice.label}"
+    msg += (
+        ". Expect a step or two per second on real scenes; pass images=False for a "
         "state-only session"
     )
-    if choice.step == "swiftshader":
+    if choice.step == "swiftshader" and seen and not nvidia:
+        msg += (
+            ", or install the GPU's Vulkan driver: apt install mesa-vulkan-drivers (Intel and "
+            "AMD GPUs; it brings lavapipe, a faster CPU renderer, too)"
+        )
+    elif choice.step == "swiftshader":
         msg += ", or apt install mesa-vulkan-drivers for a faster CPU renderer (lavapipe)"
-    if nvidia_present():
+    elif choice.step == "lavapipe" and seen and not nvidia:
+        msg += (
+            ", or see vulkaninfo --summary for why the GPU is missing (a GPU without a Vulkan "
+            "driver, or a user who may not open /dev/dri: the render and video groups)"
+        )
+    if nvidia:
         msg += ". " + nvidia_hint()[0].upper() + nvidia_hint()[1:]
     return msg
 

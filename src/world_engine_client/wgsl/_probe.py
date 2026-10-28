@@ -5,9 +5,15 @@ that instance keeps the Vulkan loader it loaded. So every probe of the search
 runs here, in a fresh interpreter started with ``python -I``, and imports
 nothing but wgpu and numpy:
 
-    python -I -B _probe.py --out RESULT.json [--preload LIBVULKAN] [--icd ICD.json]
-        [--pick hardware|software|fallback|name:SUBSTR|...] [--prefer ...]
+    python -I -B _probe.py --out RESULT.json [--sys-path] [--preload LIBVULKAN]
+        [--icd ICD.json] [--pick hardware|software|fallback|name:SUBSTR|...] [--prefer ...]
 
+--sys-path read the module search path from stdin (a JSON list of strings) and
+           search there first. ``-I`` leaves out PYTHONPATH and the user's
+           site-packages, where pip puts wgpu when the interpreter's own
+           site-packages is not writable (``pip install --user``, ``--target``):
+           the search passes its process's sys.path, so the probe imports the
+           wgpu and numpy that process imports.
 --preload  ctypes.CDLL(path, RTLD_GLOBAL) before the first enumeration, so
            wgpu-native's dlopen("libvulkan.so.1") gets this loader
 --icd      VK_ICD_FILENAMES and VK_DRIVER_FILES (the old and new names)
@@ -18,7 +24,8 @@ nothing but wgpu and numpy:
 --prefer   among hardware adapters: discrete (default) or integrated first
 
 The result is written to --out as JSON, never to stdout: some Mesa builds print
-NIR there on a shader-cache miss. It lists the adapters seen and, for each kind
+NIR there on a shader-cache miss. ``import_error`` in it says that wgpu or numpy
+did not import (then no adapter was looked at). It lists the adapters seen and, for each kind
 tried, whether a device with the WebGPU default limits renders: a 256-wide
 compute dispatch with workgroup memory and a barrier, and a blended draw into
 the colour target the renderer would use (render_wgsl.default_color_format),
@@ -221,6 +228,13 @@ def verify(wgpu, np, adapter) -> dict:
     return out
 
 
+def use_sys_path(paths) -> None:
+    """Search modules in ``paths`` (the starting process's sys.path) first,
+    then in this interpreter's own entries."""
+    given = [p for p in paths if isinstance(p, str)]
+    sys.path[:] = given + [p for p in sys.path if p not in given]
+
+
 def candidates(adapters, kind: str, prefer: str) -> list:
     ads = [a for a in adapters if a.info.get("backend_type") in NATIVE]
     if kind == "hardware":
@@ -242,10 +256,13 @@ def main(argv=None) -> int:
     ap.add_argument("--icd")
     ap.add_argument("--pick", default="hardware")
     ap.add_argument("--prefer", default="discrete")
+    ap.add_argument("--sys-path", action="store_true")
     a = ap.parse_args(argv)
     res: dict = {"python": sys.version.split()[0], "platform": sys.platform, "pick": a.pick}
     t0 = time.perf_counter()
     try:
+        if a.sys_path:
+            use_sys_path(json.load(sys.stdin))
         if a.icd:
             os.environ["VK_ICD_FILENAMES"] = os.environ["VK_DRIVER_FILES"] = a.icd
         if a.preload:
@@ -305,6 +322,8 @@ def main(argv=None) -> int:
         res["ok"] = False
         res["error"] = f"{type(exc).__name__}: {exc}"[:2000]
         res["traceback"] = traceback.format_exc()[-3000:]
+        if isinstance(exc, ImportError):
+            res["import_error"] = res["error"]
     res["seconds"] = round(time.perf_counter() - t0, 3)
     tmp = a.out + ".part"
     with open(tmp, "w") as f:
