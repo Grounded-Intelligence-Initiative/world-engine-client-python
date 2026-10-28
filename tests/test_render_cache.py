@@ -14,6 +14,7 @@ loopback ports took any local process).
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -80,6 +81,12 @@ def cache_root() -> Path:
     return cache.directory()
 
 
+def cache_module():
+    from world_engine_client import cache
+
+    return cache
+
+
 @pytest.fixture
 def sim(monkeypatch):
     return fake_chrome.install(monkeypatch)
@@ -139,6 +146,203 @@ def test_a_revoked_key_stops_rendering_even_with_a_full_cache(stub, sim):
     assert sim.received == {} and sim.pages == [], "Chrome never started"
     assert all(platform.downloads[url] == 1 for url in ALL)
     assert stub.paths()[-1] == "/control/release"
+
+
+def test_without_a_key_route_a_platform_session_fails_and_writes_nothing(stub, sim):
+    """Design 16 §8.7: a platform session whose /__key answers 404 (a website
+    without the route, a missing secret) writes no persistent plaintext."""
+    platform = Platform(stub)
+    del stub.gets["/render/__key"]
+    with pytest.raises(wec.RendererError) as caught:
+        connect(stub)
+    assert caught.value.code == "asset_key_unavailable"
+    assert platform.downloads == {} and sim.pages == [], "nothing fetched, no Chrome"
+    root = cache_root()
+    assert files_under(root / "blobs", root / "tmp") == []
+    assert plaintext_files(root, tempfile.gettempdir()) == []
+
+
+def _key_reply(platform, change: str) -> dict:
+    import dac1_ref as ref
+
+    key = platform.key()
+    reply = {
+        "v": 1,
+        "alg": "A256GCM",
+        "format": "dac1",
+        "key_id": ref.key_id(key).hex(),
+        "scope": "5f2b7d10-6c3e-4a8b-b1d9-0e4c7a2f6b31",
+        "key": base64.b64encode(key).decode(),
+    }
+    if change == "another key's id":
+        reply["key_id"] = ref.key_id(bytes(32)).hex()
+    elif change == "version 2":
+        reply["v"] = 2
+    elif change == "another algorithm":
+        reply["alg"] = "A128GCM"
+    elif change == "no scope":
+        del reply["scope"]
+    elif change == "an empty scope":
+        reply["scope"] = ""
+    elif change == "a short key":
+        reply["key"] = base64.b64encode(key[:16]).decode()
+    elif change == "another format":
+        reply["format"] = "dac2"
+    return reply
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "another key's id",
+        "version 2",
+        "another algorithm",
+        "no scope",
+        "an empty scope",
+        "a short key",
+        "another format",
+    ],
+)
+def test_a_key_reply_that_does_not_check_out_is_refused(stub, sim, change):
+    from conftest import send_json
+
+    platform = Platform(stub)
+    stub.gets["/render/__key"] = lambda h: send_json(h, 200, _key_reply(platform, change))
+    with pytest.raises(wec.RendererError) as caught:
+        connect(stub)
+    assert caught.value.code == "asset_key_unavailable", caught.value
+    assert "not readable" in str(caught.value)
+    assert platform.downloads == {} and sim.pages == []
+
+
+def test_the_key_reply_the_platform_sends_is_accepted(stub, sim):
+    from conftest import send_json
+
+    platform = Platform(stub)
+    stub.gets["/render/__key"] = lambda h: send_json(h, 200, _key_reply(platform, "none"))
+    received = session(stub, sim)
+    assert all(received[url] == data for url, data in ALL.items())
+
+
+def _age_everything(days: float, *, last_cleanup_days: float) -> None:
+    con = sqlite3.connect(cache_root() / "index.sqlite3")
+    with con:
+        then = time.time() - days * 86400
+        con.execute("UPDATE blob SET last_used = ?", (then,))
+        con.execute("UPDATE scene SET last_used = ?", (then,))
+        con.execute(
+            "INSERT OR REPLACE INTO meta (k, v) VALUES ('last_cleanup', ?)",
+            (repr(time.time() - last_cleanup_days * 86400),),
+        )
+    con.close()
+
+
+def test_a_scene_back_after_a_month_is_not_deleted_by_its_own_connect(stub, sim, monkeypatch):
+    """Design 16 §8.5.5: opening a scene refreshes its last_used, so the age
+    rule does not hit it. The connect started the day's cleanup before it
+    touched its files: a scene unused for 31 days was deleted and downloaded
+    again in full, which counts against the platform's daily limits."""
+    from world_engine_client import cache
+
+    platform = Platform(stub)
+    session(stub, sim)
+    other = cache.RenderCache()
+    other.touch_scene("other-scope", "bob/garage", named=True, encrypted=False)
+    stale = other.blob_path("e" * 64)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"x")
+    other.record_blob("e" * 64, "plain", 1)
+    other.link("other-scope", "e" * 64)
+    _age_everything(31, last_cleanup_days=2)
+    # The cleanup in the connect's thread: the order is the code's, not the
+    # scheduler's.
+    real = cache.RenderCache.maybe_cleanup
+
+    def in_this_thread(self, background=True):
+        return real(self, background=False)
+
+    monkeypatch.setattr(cache.RenderCache, "maybe_cleanup", in_this_thread)
+    received = session(stub, sim)
+    assert all(received[url] == data for url, data in ALL.items())
+    assert all(platform.downloads[url] == 1 for url in ALL), platform.downloads
+    assert not stale.exists(), "the cleanup ran: another scene unused for 31 days went"
+    assert [s["scene"] for s in cache.list_scenes()] == ["fixture"]
+
+
+def test_close_forgets_the_key_and_what_was_kept_in_memory(stub, sim):
+    Platform(stub)
+    env = connect(stub)
+    assets = env.renderer.assets
+    assert assets.key is not None
+    env.close()
+    assert assets.key is None
+    platform = Platform(stub, encrypted=False)
+    with pytest.warns(RuntimeWarning, match="memory only"):
+        env = connect(stub)
+    assets = env.renderer.assets
+    assert assets.read("/__asset/0.ply") == ASSETS["/__asset/0.ply"]
+    env.close()
+    assert assets._memory == {}
+    assert platform.downloads["/__asset/0.ply"] == 1
+
+
+def test_a_download_longer_than_the_start_limit_still_starts(stub, sim, monkeypatch):
+    """Downloads do not count against the start (design 16 §8.6 item 1): the
+    limit starts when the assets are in place."""
+    from world_engine_client import render
+
+    platform = Platform(stub)
+    platform.delay = 0.25  # 27 pieces of 4 KiB: about 7 s
+    monkeypatch.setattr(render, "_START_GRACE", 0.0)
+    started = time.monotonic()
+    received = session(stub, sim, timeout=3)
+    assert time.monotonic() - started > 5, "the download took longer than the start limit"
+    assert all(received[url] == data for url, data in ALL.items())
+
+
+@pytest.mark.parametrize(
+    "url", ["/__asset/../../outside", "__asset/0.ply", "/__asset/a b.ply", "/__asset/a?b"]
+)
+def test_asset_urls_are_checked_before_anything_is_downloaded(stub, sim, url):
+    platform = Platform(stub, encrypted=False)
+    bundle = platform.bundle
+    digest = platform.digests()["/__asset/1.glb"]
+    platform.bundle = lambda: {**bundle(), "digests": {**bundle()["digests"], url: digest}}
+    with pytest.raises(wec.RendererError) as caught:
+        connect(stub, platform=False)
+    assert caught.value.code == "asset_mismatch" and "asset URL" in str(caught.value)
+    assert platform.downloads == {}
+
+
+def test_a_local_session_refuses_encrypted_bytes(stub, sim):
+    """A plain bundle whose server sends DAC1 anyway: the client says what is
+    wrong instead of reporting a damaged file."""
+    platform = Platform(stub, encrypted=False)
+    platform.wire = lambda url: (
+        platform.cipher(url) if url.startswith("/__asset/") else (platform.assets[url])
+    )
+    with pytest.raises(wec.RendererError) as caught:
+        connect(stub, platform=False)
+    assert caught.value.code == "client_upgrade_required"
+    assert "encrypted" in str(caught.value)
+
+
+def test_a_warm_start_does_not_open_an_index_connection_per_file(stub, sim, monkeypatch):
+    """Each index statement had a connection of its own, about 12 ms a file,
+    most of it in SQLite's checkpoint when the last connection closes: a
+    300-file scene took 3.6 s to start from a full cache."""
+    from world_engine_client import cache
+
+    many = {f"/__asset/{i}.glb": f"glTF mesh {i}".encode() * 50 for i in range(40)}
+    Platform(stub, encrypted=False, assets=many)
+    session(stub, sim, platform=False)
+    opened = []
+    real = cache.sqlite3.connect
+    monkeypatch.setattr(cache.sqlite3, "connect", lambda *a, **k: opened.append(1) or real(*a, **k))
+    session(stub, sim, platform=False)
+    # The index set-up, the session, the cleanup, the page's scripts: a few,
+    # however many files the scene has.
+    assert len(opened) <= 12, f"{len(opened)} connections for {len(many) + 1} files"
 
 
 def test_a_new_key_epoch_makes_the_cache_unreadable_and_downloads_again(stub, sim):
@@ -284,6 +488,94 @@ def test_digests_are_checked_before_anything_is_downloaded(stub, sim, tmp_path, 
     assert caught.value.code == "asset_mismatch"
     assert platform.downloads.get("/__asset/1.glb", 0) == 0
     assert not (tmp_path / "deep" / "outside.part").exists()
+
+
+# ----- one file, two processes ---------------------------------------------- #
+def _scene_assets(stub, root, platform):
+    """A local engine's scene, read through SceneAssets alone (no renderer)."""
+    from world_engine_client import cache
+
+    def fetch(path, headers=None):
+        request = urllib.request.Request(stub.url + "/render" + path, headers=headers or {})
+        return urllib.request.urlopen(request, timeout=30)
+
+    return cache.SceneAssets(
+        fetch, platform.digests(), encrypted=False, platform=False, cache_dir=root
+    )
+
+
+def _as_another_process(store, name):
+    """The name's lock as another process takes it: the OS file lock only."""
+    lock = store.lock(name)
+    lock._thread = threading.Lock()
+    return lock
+
+
+def test_a_file_deleted_while_a_session_looks_it_up_is_downloaded_again(
+    stub, tmp_path, monkeypatch
+):
+    """Cleanup in another process holds a file's lock while it reads last_used
+    and deletes the file. A session that touched and checked it meanwhile,
+    without the lock, took it as cached, and serving it broke off later."""
+    monkeypatch.setattr(cache_module().RenderCache, "maybe_cleanup", lambda self, **_: False)
+    root = tmp_path / "c"
+    platform = Platform(stub, encrypted=False)
+    _scene_assets(stub, root, platform).prepare()
+    url = "/__asset/0.ply"
+    name = platform.digests()[url]
+    store = cache_module().RenderCache(root)
+    cleanup = _as_another_process(store, name)
+    assert cleanup.acquire(wait=False)  # and last_used was old: it goes
+    later = _scene_assets(stub, root, platform)
+    thread = threading.Thread(target=later.prepare, daemon=True)
+    thread.start()
+    time.sleep(1.0)
+    store.forget(name, "blob")
+    cleanup.release(remove=True)
+    thread.join(timeout=30)
+    assert not thread.is_alive()
+    assert later.read(url) == ASSETS[url], "the session's file is still there"
+    assert platform.downloads[url] == 2
+
+
+def test_waiters_check_a_finished_download_outside_its_lock(stub, tmp_path, monkeypatch):
+    """Processes that waited for one download checked the finished file one
+    after another, each holding its lock: with N environments on a cold
+    cache, start-up grew with N times the file's size."""
+    mod = cache_module()
+    monkeypatch.setattr(mod.RenderCache, "maybe_cleanup", lambda self, **_: False)
+    root = tmp_path / "c"
+    platform = Platform(stub, encrypted=False)
+    url = "/__asset/0.ply"
+    name = platform.digests()[url]
+    store = mod.RenderCache(root)
+    downloader = _as_another_process(store, name)
+    assert downloader.acquire(wait=False)
+    checks = []
+    real = mod.SceneAssets._verify
+
+    def verify(self, entry, path):
+        probe = _as_another_process(self.cache, entry.name)
+        free = probe.acquire(wait=False)
+        if free:
+            probe.release()
+        checks.append((entry.url, free))
+        return real(self, entry, path)
+
+    monkeypatch.setattr(mod.SceneAssets, "_verify", verify)
+    waiter = _scene_assets(stub, root, platform)
+    thread = threading.Thread(target=waiter.prepare, daemon=True)
+    thread.start()
+    time.sleep(0.5)
+    path = store.blob_path(name)  # the other process's download, finished
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(ASSETS[url])
+    store.record_blob(name, "plain", len(ASSETS[url]))
+    downloader.release(remove=True)
+    thread.join(timeout=30)
+    assert not thread.is_alive()
+    assert waiter.read(url) == ASSETS[url] and url not in platform.downloads
+    assert [free for u, free in checks if u == url] == [True], checks
 
 
 # ----- a local engine's plain assets ---------------------------------------- #

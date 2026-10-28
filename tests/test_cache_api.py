@@ -256,13 +256,18 @@ def test_legacy_plain_files_are_removed_on_request(store, tmp_path):
     (store.root / ("e" * 64 + ".part")).write_bytes(b"glTF")
     keep = store.root / "notes.txt"
     keep.write_bytes(b"mine")
-    temp = Path(tempfile.gettempdir()) / "we_render_abc"
-    temp.mkdir()
-    (temp / ("f" * 64)).write_bytes(b"ply\n")
+    temp, busy = (Path(tempfile.gettempdir()) / f"we_render_{n}" for n in ("abc", "def"))
+    for d in (temp, busy):
+        d.mkdir()
+        (d / ("f" * 64)).write_bytes(b"ply\n")
+    then = time.time() - 2 * 3600
+    for p in (temp / ("f" * 64), temp):
+        os.utime(p, (then, then))
     out = cache.clear(legacy=True)
     size = len(b"ply\nformat binary_little_endian 1.0\n") + len(b"glTF")
     assert out == {"legacy": {"files": 2, "bytes": size, "temp_dirs": 1}}
     assert not old.exists() and keep.exists() and not temp.exists()
+    assert busy.exists(), "used in the last hour: an old client may still be loading from it"
 
 
 def test_reading_a_cache_that_does_not_exist_creates_nothing(tmp_path):
@@ -300,6 +305,49 @@ def test_without_file_locks_one_process_still_excludes_its_threads(store, monkey
         assert first.acquire(wait=False)
     assert not store.lock("q" * 32).acquire(wait=False), "the thread lock still holds"
     first.release()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_an_existing_cache_dir_is_made_private(tmp_path):
+    """BUG-19: an old client created its cache_dir 0755. This version makes a
+    directory it is given 0700, and the ones it creates in it."""
+    import stat
+
+    given = tmp_path / "old-cache"
+    given.mkdir(mode=0o755)
+    os.chmod(given, 0o755)
+    store = cache.RenderCache(given)
+    for d in (given, store.blobs, store.pages, store.tmp, store.locks):
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700, d
+    assert stat.S_IMODE(store.index.stat().st_mode) == 0o600
+
+
+def test_the_index_needs_no_sqlite_newer_than_3_7_15(tmp_path, monkeypatch):
+    """Python 3.11 builds on older clusters link SQLite 3.22 (Ubuntu 18.04)
+    or 3.7.17 (CentOS 7). UPSERT came in 3.24: the first record_blob failed
+    there, and every image session with it. Here a parser of the old kind."""
+    import re as regex
+
+    newer = regex.compile(r"\bON\s+CONFLICT\b|\bRETURNING\b|\bSTRICT\b|->>|\bIIF\(", regex.I)
+
+    class OldSqlite(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if newer.search(sql):
+                raise sqlite3.OperationalError(f"near {newer.search(sql).group(0)!r}: syntax error")
+            return super().execute(sql, *args)
+
+    real = sqlite3.connect
+    monkeypatch.setattr(cache.sqlite3, "connect", lambda *a, **k: real(*a, factory=OldSqlite, **k))
+    store = cache.RenderCache(tmp_path / "c")
+    add_scene(store, "s1", "alice/kitchen", files=[("1" * 64, 10)])
+    store.record_blob("1" * 64, "plain", 12)
+    assert store.touch_blob("1" * 64)["size"] == 12, "a second record updates the row"
+    store.record_blob("p" * 40, "page", 5, sha256="9" * 64)
+    row = {"kind": "page", "size": 5, "key_id": None, "sha256": "9" * 64}
+    assert store.touch_blob("p" * 40) == row
+    cache.pin("alice/kitchen", tmp_path / "c")
+    store.cleanup()  # also drops the page row: it has no file
+    assert cache.clear(cache_dir=tmp_path / "c") == {"scenes": 1, "files": 1, "bytes": 10}
 
 
 def test_a_cache_dir_that_cannot_be_used_says_so(tmp_path):
@@ -388,6 +436,47 @@ def test_the_command_line(store, tmp_path):
     other = tmp_path / "other"
     code, out, _ = run("--dir", str(other), "ls")
     assert code == 0 and json.loads(out) == [] and not other.exists()
+
+
+def _legacy_leftovers(store) -> tuple[Path, Path]:
+    """A plain file an old client left in the cache_dir, and one of its
+    we_render_* directories, unused for two hours."""
+    old = store.root / ("d" * 64)
+    old.write_bytes(b"ply\nformat binary_little_endian 1.0\n")
+    temp = Path(tempfile.gettempdir()) / "we_render_old"
+    temp.mkdir()
+    (temp / ("f" * 64)).write_bytes(b"ply\n")
+    then = time.time() - 2 * 3600
+    for p in (temp / ("f" * 64), temp):
+        os.utime(p, (then, then))
+    return old, temp
+
+
+def test_clear_all_with_legacy_clears_both(store):
+    """--all --legacy kept every scene and exited 0: --all was dropped."""
+    add_scene(store, "s1", "alice/kitchen", files=[("1" * 64, 10)])
+    old, temp = _legacy_leftovers(store)
+    code, out, _ = run("clear", "--all", "--legacy")
+    shown = json.loads(out)
+    assert code == 0 and shown["scenes"] == 1 and shown["files"] == 1, shown
+    size = len(b"ply\nformat binary_little_endian 1.0\n")
+    assert shown["legacy"] == {"files": 1, "bytes": size, "temp_dirs": 1}
+    assert cache.list_scenes() == [] and names(store) == set()
+    assert not old.exists() and not temp.exists()
+
+
+def test_clear_a_scene_with_legacy_and_legacy_alone(store):
+    add_scene(store, "s1", "alice/kitchen", files=[("1" * 64, 10)])
+    add_scene(store, "s2", "bob/garage", files=[("2" * 64, 10)])
+    old, temp = _legacy_leftovers(store)
+    code, out, _ = run("clear", "alice/kitchen", "--legacy")
+    shown = json.loads(out)
+    assert code == 0 and shown["scenes"] == 1 and shown["legacy"]["files"] == 1
+    assert [s["scene"] for s in cache.list_scenes()] == ["bob/garage"]
+    assert not old.exists() and not temp.exists()
+    code, out, _ = run("clear", "--legacy")
+    assert code == 0 and set(json.loads(out)) == {"legacy"}, "only the legacy files"
+    assert [s["scene"] for s in cache.list_scenes()] == ["bob/garage"]
 
 
 def test_python_dash_m_runs_the_command_line(store):

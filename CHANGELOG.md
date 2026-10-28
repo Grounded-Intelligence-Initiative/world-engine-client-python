@@ -19,7 +19,8 @@
   `configure` (`max_age_days`, 0 keeps everything; `max_size_gb`) and
   `settings`. The same from a shell: `python -m world_engine_client.cache`.
   `DIGIARENA_CACHE_MAX_AGE_DAYS` and `DIGIARENA_CACHE_MAX_SIZE_GB` override
-  the stored settings.
+  the stored settings. The check runs when a renderer starts, at most once a
+  day, after the session's own files are in place.
 - A revoked key stops images: connect raises `RendererError` with code
   `asset_key_revoked`, even when the scene is cached.
 - Fixed (BUG-19): a cached file was used without a check. Now every file is
@@ -41,8 +42,9 @@
 - Fixed (BUG-19): a killed process left plain scene assets in
   `/tmp/we_render_*`. The renderer deletes such directories once nobody has
   used them for a day; `python -m world_engine_client.cache --dir <old
-  cache_dir> clear --legacy` deletes those and the plain files of an old
-  `cache_dir`. This version does not read those files.
+  cache_dir> clear --legacy` deletes those (except ones used in the last
+  hour) and the plain files of an old `cache_dir`. This version does not
+  read those files.
 - Fixed (BUG-32): any process on the machine could read the scene from the
   loopback HTTP server, and could connect to the loopback WebSocket and put
   its own images into the observations. Both now need a random token of the

@@ -29,7 +29,8 @@ Retention: a file not used for ``max_age_days`` (default 30; 0 keeps files
 however old) is deleted, unless its scene is pinned. ``max_size_gb`` (default:
 no limit) deletes the least recently used files of unpinned scenes once the
 cache is larger. The check runs in the background when a renderer starts, at
-most once a day. ``DIGIARENA_CACHE_MAX_AGE_DAYS`` and
+most once a day, after that session's files are in place: the scene being
+opened is not deleted. ``DIGIARENA_CACHE_MAX_AGE_DAYS`` and
 ``DIGIARENA_CACHE_MAX_SIZE_GB`` override the stored settings.
 
 API: :func:`list_scenes` (also ``list``), :func:`pin`, :func:`unpin`,
@@ -419,6 +420,7 @@ class RenderCache:
         self.index = self.root / "index.sqlite3"
         self.file_locks = True
         self.network_fs = False
+        self._local = threading.local()  # .con: this thread's connection inside batch()
         try:
             for d in (self.root, self.blobs, self.pages, self.tmp, self.locks):
                 _private_dir(d)
@@ -469,23 +471,60 @@ class RenderCache:
                 time.sleep(0.05 * 2**attempt)
 
     # ----- index ------------------------------------------------------------ #
-    @contextlib.contextmanager
-    def _db(self, write: bool = False):
+    def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(str(self.index), timeout=30, isolation_level=None)
         try:
             con.execute("PRAGMA busy_timeout = 30000")
+            if con.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal":
+                # A commit no longer waits for the disk. In WAL mode a crash
+                # may lose the last commits but never breaks the index, and
+                # the files are checked when used anyway.
+                con.execute("PRAGMA synchronous = NORMAL")
+        except BaseException:
+            con.close()
+            raise
+        return con
+
+    @contextlib.contextmanager
+    def batch(self) -> Iterator[None]:
+        """One index connection for this thread until the block ends. Each
+        statement on a connection of its own cost about 12 ms, most of it in
+        the checkpoint SQLite runs when the last connection closes: a session
+        start grew with its number of files. Not kept beyond the block, since
+        an open SQLite connection must not be carried across fork()."""
+        if getattr(self._local, "con", None) is not None:
+            yield
+            return
+        con = self._connect()
+        self._local.con = con
+        try:
+            yield
+        finally:
+            self._local.con = None
+            con.close()
+
+    @contextlib.contextmanager
+    def _db(self, write: bool = False):
+        con = getattr(self._local, "con", None)
+        own = con is None
+        if own:
+            con = self._connect()
+        try:
             if write:
                 con.execute("BEGIN IMMEDIATE")
             try:
                 yield con
-            except BaseException:
                 if write:
-                    con.execute("ROLLBACK")
+                    con.execute("COMMIT")
+            except BaseException:
+                # A connection kept for a batch must not stay in a transaction.
+                if write and con.in_transaction:
+                    with contextlib.suppress(sqlite3.Error):
+                        con.execute("ROLLBACK")
                 raise
-            if write:
-                con.execute("COMMIT")
         finally:
-            con.close()
+            if own:
+                con.close()
 
     @staticmethod
     def _meta(con, key: str) -> str | None:
@@ -625,14 +664,20 @@ class RenderCache:
 
     def record_blob(self, name: str, kind: str, size: int, *, key_id=None, sha256=None) -> None:
         now = time.time()
+        # No UPSERT (INSERT ... ON CONFLICT): it needs SQLite 3.24, and Python
+        # builds on older systems link 3.22 or less.
         with self._db(write=True) as con:
-            con.execute(
-                "INSERT INTO blob (name, kind, size, key_id, sha256, created, last_used)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET"
-                " kind = excluded.kind, size = excluded.size, key_id = excluded.key_id,"
-                " sha256 = excluded.sha256, last_used = excluded.last_used",
-                (name, kind, size, key_id, sha256, now, now),
+            cur = con.execute(
+                "UPDATE blob SET kind = ?, size = ?, key_id = ?, sha256 = ?, last_used = ?"
+                " WHERE name = ?",
+                (kind, size, key_id, sha256, now, name),
             )
+            if not cur.rowcount:
+                con.execute(
+                    "INSERT INTO blob (name, kind, size, key_id, sha256, created, last_used)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (name, kind, size, key_id, sha256, now, now),
+                )
 
     def link(self, scope: str, name: str) -> None:
         with self._db(write=True) as con:
@@ -715,6 +760,10 @@ class RenderCache:
         """Delete one scene's files, or every file when ``scene`` is None.
         Files another scene uses too stay; files being downloaded right now
         stay."""
+        with self.batch():
+            return self._clear(scene)
+
+    def _clear(self, scene: str | None) -> dict:
         freed = files = 0
         with self._db() as con:
             if scene is None:
@@ -756,7 +805,7 @@ class RenderCache:
     def clear_legacy(self) -> dict:
         """Delete what clients before 0.6 left: plain files named by their
         digest at the top of a ``cache_dir``, and ``we_render_*`` temporary
-        directories."""
+        directories unused for an hour."""
         return _clear_legacy_without_cache(self.root)
 
     def legacy_files(self) -> int:
@@ -797,7 +846,10 @@ class RenderCache:
     def cleanup(self, now: float | None = None) -> dict:
         """Apply the retention settings now. Files used within the last hour
         always stay, and so do files being downloaded."""
-        now = time.time() if now is None else now
+        with self.batch():
+            return self._cleanup(time.time() if now is None else now)
+
+    def _cleanup(self, now: float) -> dict:
         s = self.settings()
         freed = files = 0
         unpinned = (
@@ -1243,10 +1295,12 @@ class SceneAssets:
     def key(self) -> SceneKey | None:
         return self._key
 
-    def prepare(self, *, verify_hits: bool = True) -> None:
+    def prepare(self, *, verify_hits: bool = True, cleanup: bool = True) -> None:
         """Get the key, then download or verify every asset. ``verify_hits``
         False checks only the size and header of a cached file (a caller
-        that decrypts everything before use anyway)."""
+        that decrypts everything before use anyway). ``cleanup`` then applies
+        the retention settings in the background, at most once a day; the
+        files of this session were just used, so they stay."""
         for url, digest in self._digests.items():
             if not isinstance(url, str) or not _ASSET_URL.fullmatch(url) or "/../" in url + "/":
                 raise RendererError(
@@ -1262,30 +1316,36 @@ class SceneAssets:
             self.scope = self._key.scope
         else:
             self.scope = f"local:{self._origin}/{self._scene_id or 'scene'}"
-        if self.cache is not None and self.mode != "memory":
-            if self.cache.legacy_files():
-                _warn_once(
-                    f"legacy:{self.cache.root}",
-                    f"{self.cache.root} holds plain scene files from a world-engine-client "
-                    "before 0.6; they are no longer read. "
-                    f"python -m world_engine_client.cache --dir {self.cache.root} clear "
-                    "--legacy deletes them",
+        cache = self.cache
+        with cache.batch() if cache is not None else contextlib.nullcontext():
+            if cache is not None and self.mode != "memory":
+                if cache.legacy_files():
+                    _warn_once(
+                        f"legacy:{cache.root}",
+                        f"{cache.root} holds plain scene files from a world-engine-client "
+                        "before 0.6; they are no longer read. "
+                        f"python -m world_engine_client.cache --dir {cache.root} clear "
+                        "--legacy deletes them",
+                    )
+                cache.touch_scene(
+                    self.scope,
+                    self._scene_name or self._scene_id or self.scope,
+                    named=bool(self._scene_name),
+                    encrypted=self.mode == "encrypted",
+                    key_id=self._key.key_id.hex() if self._key else None,
                 )
-            self.cache.touch_scene(
-                self.scope,
-                self._scene_name or self._scene_id or self.scope,
-                named=bool(self._scene_name),
-                encrypted=self.mode == "encrypted",
-                key_id=self._key.key_id.hex() if self._key else None,
-            )
-        for url in self.urls:
-            entry = self._entry(url)
-            self._ensure(entry, verify_hits)
-            self._entries[url] = entry
-            if entry.kept == "disk":
-                self.cache.link(self.scope, entry.name)
-        if self._key is not None and self.cache is not None:
-            self.cache.drop_other_keys(self.scope, self._key.key_id.hex())
+            for url in self.urls:
+                entry = self._entry(url)
+                self._ensure(entry, verify_hits)
+                self._entries[url] = entry
+                if entry.kept == "disk":
+                    cache.link(self.scope, entry.name)
+            if self._key is not None and cache is not None:
+                cache.drop_other_keys(self.scope, self._key.key_id.hex())
+        if cleanup and cache is not None:
+            # Only now: a scene opened after more than max_age_days unused was
+            # deleted by its own connect's cleanup and downloaded again.
+            cache.maybe_cleanup()
 
     def _entry(self, url: str) -> _Entry:
         digest = self._digests[url]
@@ -1318,32 +1378,50 @@ class SceneAssets:
             return
         cache = self.cache
         path = cache.blob_path(entry.name)
-        if cache.touch_blob(entry.name) is not None and path.exists():
-            try:
-                entry.length = (self._verify if verify_hits else self._length)(entry, path)
-                return
-            except (dac1.Dac1Error, _Mismatch, OSError) as exc:
-                log.info("cached %s is damaged (%s): downloading it again", entry.url, exc)
         lock = cache.lock(entry.name)
+        # Looked up under the name's lock, which also waits for a process
+        # downloading the file. Cleanup deletes a file only under this lock,
+        # after reading its last_used again: once touched here, it stays for
+        # this session.
         held = lock.acquire(give_up=_StallWatch(cache, entry.name))
         try:
-            if path.exists():
-                # Another process finished it while we waited, or a process
-                # died between storing the file and recording it.
-                try:
-                    entry.length = self._verify(entry, path)
-                    self._record(entry, path)
-                    return
-                except (dac1.Dac1Error, _Mismatch, OSError) as exc:
-                    log.info("cached %s is damaged (%s): downloading it again", entry.url, exc)
-                    if held:
-                        cache.forget(entry.name, "blob")
-            if held:
-                cache.remove_parts(entry.name)
-            self._download(entry)
+            if cache.touch_blob(entry.name) is None or not path.exists():
+                self._fill(entry, path, held)
+                return
         finally:
             if held:
                 lock.release(remove=True)
+        # A file in place never changes, so it is checked outside the lock,
+        # while other processes check their copies of it.
+        try:
+            entry.length = (self._verify if verify_hits else self._length)(entry, path)
+            return
+        except (dac1.Dac1Error, _Mismatch, OSError) as exc:
+            log.info("cached %s is damaged (%s): downloading it again", entry.url, exc)
+        held = lock.acquire(give_up=_StallWatch(cache, entry.name))
+        try:
+            self._fill(entry, path, held)
+        finally:
+            if held:
+                lock.release(remove=True)
+
+    def _fill(self, entry: _Entry, path: Path, held: bool) -> None:
+        """With the name's lock (``held``; False when its holder stalled): keep
+        the file in place if it verifies (another process stored it, or died
+        between storing and recording it), else download it."""
+        cache = self.cache
+        if path.exists():
+            try:
+                entry.length = self._verify(entry, path)
+                self._record(entry, path)
+                return
+            except (dac1.Dac1Error, _Mismatch, OSError) as exc:
+                log.info("cached %s is damaged (%s): downloading it again", entry.url, exc)
+                if held:
+                    cache.forget(entry.name, "blob")
+        if held:
+            cache.remove_parts(entry.name)
+        self._download(entry)
 
     def _record(self, entry: _Entry, path: Path) -> None:
         self.cache.record_blob(
@@ -1601,9 +1679,9 @@ def clear(
 ) -> dict:
     """Delete a scene's cached files, or every cached file when ``scene`` is
     None. ``legacy=True`` also deletes what clients before 0.6 left: plain
-    files in a ``cache_dir`` and ``we_render_*`` temporary directories.
-    ``clear(legacy=True)`` without a scene deletes only those. Returns what was
-    removed."""
+    files in a ``cache_dir`` and ``we_render_*`` temporary directories unused
+    for an hour. ``clear(legacy=True)`` without a scene deletes only those.
+    Returns what was removed."""
     cache = _existing(cache_dir)
     out: dict = {}
     if scene is not None or not legacy:
@@ -1630,7 +1708,8 @@ def _clear_legacy_without_cache(root: Path) -> dict:
                     path.unlink()
                     freed += size
                     files += 1
-    dirs, _ = remove_temp_dirs(age=0)
+    # Spare what an old client running on this machine may still be loading.
+    dirs, _ = remove_temp_dirs(age=_IN_USE)
     return {"files": files, "bytes": freed, "temp_dirs": dirs}
 
 
@@ -1713,7 +1792,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--legacy",
         action="store_true",
         help="plain files that clients before 0.6 left in --dir, and their we_render_* "
-        "temporary directories",
+        "temporary directories unused for an hour",
     )
     p_config = sub.add_parser("config", help="show or change the retention settings")
     p_config.add_argument("--max-age-days", help="days unused before a file goes; 0 keeps all")
@@ -1741,7 +1820,14 @@ def run(args: argparse.Namespace, out=None, err=None) -> int:
             if args.scene is not None and args.all:
                 print("error: name a scene or pass --all, not both", file=err)
                 return 2
-            show(clear(args.scene, legacy=args.legacy, cache_dir=args.dir))
+            if args.all:
+                # clear(legacy=True) without a scene clears only the legacy files.
+                result = clear(cache_dir=args.dir)
+                if args.legacy:
+                    result["legacy"] = clear(legacy=True, cache_dir=args.dir)["legacy"]
+                show(result)
+            else:
+                show(clear(args.scene, legacy=args.legacy, cache_dir=args.dir))
         elif cmd == "config":
             changes = {}
             if args.max_age_days is not None:

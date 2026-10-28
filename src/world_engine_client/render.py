@@ -293,8 +293,6 @@ class LocalRenderer:
                 scene_id=scene_id,
                 origin=origin,
             )
-            if self.assets.cache is not None:
-                self.assets.cache.maybe_cleanup()
             # Downloads have their own limit (no new bytes for 60 s): a large
             # scene on a slow line does not count against the start.
             try:

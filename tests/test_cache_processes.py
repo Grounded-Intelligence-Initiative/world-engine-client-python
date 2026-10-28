@@ -164,6 +164,16 @@ def test_a_download_killed_halfway_is_taken_over_at_once(stub, tmp_path, tmp, mo
     a.send_signal(signal.SIGKILL)
     a.wait(timeout=30)
     platform.delay = 0.0
+    # The day's cleanup, which also removes a dead download's file, ran
+    # already: the next download of the file has to.
+    import sqlite3
+
+    con = sqlite3.connect(cache / "index.sqlite3")
+    with con:
+        con.execute(
+            "INSERT OR REPLACE INTO meta (k, v) VALUES ('last_cleanup', ?)", (repr(time.time()),)
+        )
+    con.close()
     started = time.monotonic()
     c = worker(stub, cache, tmp_path / "c.json", mode, tmp)
     assert c.wait(timeout=120) == 0
@@ -208,3 +218,74 @@ def test_processes_that_create_one_cache_at_once_all_get_it(tmp_path):
             p.join(timeout=60)
         failures += [r for r in (results.get(timeout=10) for _ in procs) if r != "ok"]
     assert failures == []
+
+
+HOLDER = """
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from world_engine_client import cache
+c = cache.RenderCache(sys.argv[2])
+lock = c.lock(sys.argv[3])
+assert lock.acquire(wait=False)
+part, fd = c.new_part(sys.argv[3])
+os.write(fd, b"x" * 4096)
+print("held", flush=True)
+time.sleep(3600)
+"""
+
+
+def test_a_waiter_goes_ahead_when_the_download_it_waits_for_stops(stub, tmp_path, monkeypatch):
+    """A process stopped while it holds a file's lock (SIGSTOP, a debugger, a
+    frozen NFS client): the kernel keeps the lock. The waiter goes ahead when
+    the other's download has not grown for _STALL_SECONDS."""
+    import threading
+
+    import fake_chrome
+
+    from world_engine_client import cache as cache_module
+
+    platform = Platform(stub, encrypted=False)
+    sim = fake_chrome.install(monkeypatch)
+    monkeypatch.setattr(cache_module, "_STALL_SECONDS", 1.5)
+    root = tmp_path / "shared"
+    name = hashlib.sha256(ASSETS[SPLAT]).hexdigest()  # a local scene's file name: its digest
+    src = Path(wec.__file__).resolve().parents[1]
+    holder = subprocess.Popen(
+        [sys.executable, "-c", HOLDER, str(src), str(root), name],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        holder.send_signal(signal.SIGSTOP)
+        done: dict = {}
+
+        def run():
+            try:
+                env = wec.connect(
+                    "secret", url=stub.url, images=True, render_options={"cache_dir": str(root)}
+                )
+                try:
+                    env.reset(seed=0)
+                    done["received"] = dict(sim.received)
+                finally:
+                    env.close()
+            except Exception as exc:  # noqa: BLE001 - the test reads it
+                done["error"] = repr(exc)
+
+        started = time.monotonic()
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=60)
+        waited = time.monotonic() - started
+        stuck = thread.is_alive()
+    finally:
+        holder.send_signal(signal.SIGKILL)
+        holder.wait(timeout=30)
+    if stuck:
+        thread.join(timeout=60)  # the lock is free now
+    assert not stuck, "the waiter never gave up on the stopped holder"
+    assert "error" not in done, done
+    assert done["received"][SPLAT] == ASSETS[SPLAT]
+    assert waited > 1.5, "it waited for the holder first"
+    assert platform.downloads[SPLAT] == 1

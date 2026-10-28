@@ -127,7 +127,10 @@ download resumes where it stopped; one that sends nothing for 60 seconds
 fails. Downloads do not count against the renderer's start time.
 
 A file not used for 30 days is deleted unless its scene is pinned. The check
-runs in the background when a renderer starts, at most once a day.
+runs in the background when a renderer starts, at most once a day, after the
+session's own files are in place: the scene you open is not deleted, however
+long it went unused. A machine that no longer starts renderers keeps its files
+until you clear them.
 
 ```python
 from world_engine_client import cache
@@ -150,7 +153,8 @@ Clients before 0.6 kept plain copies of scene assets in `cache_dir` and in
 `we_render_*` temporary directories. This client does not read them. It
 deletes `we_render_*` directories that nobody has used for a day, and
 `python -m world_engine_client.cache --dir <old cache_dir> clear --legacy`
-deletes the rest.
+deletes the rest, except directories used in the last hour: an old client may
+still be loading from one. `clear --all --legacy` clears the cache as well.
 
 Without a hardware GPU, the images are rendered in software (SwiftShader) and
 a `RuntimeWarning` says so before the first frame. Expect seconds per step: with
