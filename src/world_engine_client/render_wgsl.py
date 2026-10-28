@@ -215,9 +215,10 @@ def start_renderer(
     one fails, with one RuntimeWarning that names each adapter and its error.
     The search passes over those adapters from then on in this process
     (``adapters.mark_failed``) and keeps the one it takes for the next session.
-    Raises NoRenderAdapter, naming the failures, when no adapter is left (or
-    the next one needs a Vulkan loader this process did not load): connect()
-    then draws with the browser path. ``options`` go to WGSLRenderer."""
+    When the process's wgpu instance does not have that one (another Vulkan
+    loader's), its best adapter left is tried. Raises NoRenderAdapter, naming
+    the failures, when no adapter is left: connect() then draws with the
+    browser path. ``options`` go to WGSLRenderer."""
     from .wgsl import adapters
 
     search = {"adapter": adapter, "allow_software": allow_software, "cache_dir": cache_dir}
