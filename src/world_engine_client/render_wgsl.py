@@ -94,11 +94,14 @@ def open_adapter(
     ``(adapter, AdapterChoice)``. Probes once per environment (the result is
     kept next to the render cache for a day). Emits the software warning.
     Raises NoRenderAdapter."""
+    from .cache import _private_dir
     from .wgsl import adapters
 
     try:
-        cache_file = directory(cache_dir) / "adapters.json"
-    except Exception:  # noqa: BLE001 - no cache directory: probe every time
+        root = directory(cache_dir)
+        _private_dir(root)  # created as the render cache creates it: this user only
+        cache_file = root / "adapters.json"
+    except Exception:  # noqa: BLE001 - no usable cache directory: probe every time
         cache_file = None
     with _lock:  # one search at a time in this process (the instance is shared)
         try:

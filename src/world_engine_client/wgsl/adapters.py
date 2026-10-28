@@ -290,7 +290,8 @@ def _write_cache(cache_file, key: str, choice: AdapterChoice) -> None:
     try:
         Path(cache_file).parent.mkdir(parents=True, exist_ok=True)
         tmp = f"{cache_file}.{os.getpid()}.part"
-        with open(tmp, "w") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump({"key": key, "time": time.time(), "choice": choice.as_dict()}, f)
         os.replace(tmp, cache_file)
     except OSError:

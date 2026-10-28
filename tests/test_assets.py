@@ -21,9 +21,16 @@ def _scene(stub, platform, root):
         req = urllib.request.Request(stub.url + "/render" + path, headers=headers or {})
         return urllib.request.urlopen(req, timeout=30)
 
-    s = cache.SceneAssets(
-        fetch, platform.digests(), encrypted=platform.encrypted, platform=True, cache_dir=root
-    )
+    def open_scene():
+        return cache.SceneAssets(
+            fetch, platform.digests(), encrypted=platform.encrypted, platform=True, cache_dir=root
+        )
+
+    if platform.encrypted:
+        s = open_scene()
+    else:  # a platform from before the encryption: memory only, one warning
+        with pytest.warns(RuntimeWarning, match="memory only"):
+            s = open_scene()
     s.prepare()
     return s
 

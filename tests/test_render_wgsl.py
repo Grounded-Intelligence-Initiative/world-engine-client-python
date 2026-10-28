@@ -362,3 +362,26 @@ def test_a_software_adapter_warns_once_per_process(monkeypatch, tmp_path):
     texts = [str(w.message) for w in log if issubclass(w.category, RuntimeWarning)]
     assert len(texts) == 1 and "llvmpipe" in texts[0] and "images=False" in texts[0]
     assert seen[0]["cache_file"] == tmp_path / "adapters.json", "kept next to the render cache"
+
+
+def test_the_adapter_search_keeps_its_result_in_a_private_cache(monkeypatch, tmp_path):
+    """The adapter cache sits in the render cache's directory: created for this
+    user only, like the render cache creates it, before anything is written."""
+    import stat
+
+    from world_engine_client.wgsl import adapters
+
+    picked = {"device": "gpu", "adapter_type": "DiscreteGPU", "backend_type": "Vulkan"}
+    monkeypatch.setattr(
+        adapters,
+        "run_probe",
+        lambda opts, timeout=None: {"ok": True, "adapters": [], "picked": {"adapter": picked}},
+    )
+    monkeypatch.setattr(adapters, "_open", lambda c: object())
+    monkeypatch.setattr(adapters, "instance_created", lambda: False)
+    root = tmp_path / "new" / "digiarena" / "render"
+    _, choice = render_wgsl.open_adapter(cache_dir=root)
+    assert choice.step == "system" and (root / "adapters.json").is_file()
+    for made in (tmp_path / "new", root.parent, root):
+        assert stat.S_IMODE(made.stat().st_mode) == 0o700, made
+    assert stat.S_IMODE((root / "adapters.json").stat().st_mode) == 0o600
