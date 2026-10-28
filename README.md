@@ -76,23 +76,34 @@ pip install 'world-engine-client[render]'
 ```
 
 A server with renderer D (render protocol 2) has its scenes drawn by
-`WGSLRenderer`: a WGSL splat renderer on wgpu, in this process, with no
-browser. It sorts the splats on the GPU, draws every camera in one frame and
-reads the images straight into numpy, `(H, W, 3) uint8` per camera, each camera
-at its own size. The shaders ship inside this package (`world_engine_client.wgsl`,
-a copy of the engine's); the client never runs a shader a server sends. Older
+`WGSLRenderer`: a WGSL renderer on wgpu, in this process, with no browser. It
+sorts the splats on the GPU, draws every camera in one frame and reads the
+images straight into numpy, `(H, W, 3) uint8` per camera, each camera at its
+own size. The shaders ship inside this package (`world_engine_client.wgsl`, a
+copy of the engine's); the client never runs a shader a server sends. Older
 servers (render protocol 1) get the browser path below. `info["render"]` says
-which renderer and which adapter drew the step, and `reason` why, when it is
-not the obvious one.
+which renderer, which adapter and which lighting drew the step, and `reason`
+why, when it is not the obvious one.
 
-Renderer D's pipeline `wgsl/1` draws meshes (objects, robot links) flat for
-now: one colour per material, one fixed light, no PBR, environment lighting
-or shadows, which a later pipeline version brings. Its mesh pixels differ from
-the browser path's (on design doc 16's room scene by 33/255 on average where a
-mesh is in front; 1.7/255 in the splat region). `render_options={"renderer":
+Renderer D's pipeline `wgsl/1` draws the splats as Spark does and the meshes
+(objects, robot links) as the engine's capture page does: three.js's
+MeshStandardMaterial with the objects' maps, from the WEM1 the engine compiles
+each GLB into, lit by the scene's own lighting (the splats baked at its light
+probe; its HDRI; three's room environment when the probe is dark), with design
+doc 14's local offsets, proxy boxes and scrolling belts. It adds the key
+light's shadow, which the browser path does not draw. Splats and meshes are
+blended above 8 bits and rounded to 8 bits once, so adapters agree closely: an
+RTX 4090, Mesa's lavapipe and the bundled SwiftShader differ by about 0.1/255
+in the splat region. On design doc 16's room scene the images differ from the
+browser path's by 1.7/255 on average in the splat region and 0.9/255 where a
+mesh is in front (0.5/255 without the shadow). `render_options={"renderer":
 "chrome"}` keeps the browser path's images. A newer server answers protocol 1
-for a scene `wgsl/1` cannot draw (an HDRI, a SuperSplat compressed PLY, a mesh
-that is not a GLB) and says why; the client warns once with that reason.
+for a scene `wgsl/1` cannot draw as the capture page does (a SuperSplat
+compressed PLY, an OpenEXR HDRI with PIZ, PXR24, B44 or DWA compression, an
+object whose GLB did not compile to WEM1, a lighting asset) and says why; the
+client warns once with that reason. A session of renderer D downloads the
+assets it draws (the splat, the objects' WEM1, the robot links, an HDRI) and
+leaves the objects' GLBs, which only the browser path reads, on the server.
 
 Which adapter draws: a GPU first (a discrete one, an integrated one, then a
 virtual GPU of a VM or a cloud), then a software one. On Linux the client
@@ -124,8 +135,9 @@ renderer D onto the GPU; if not, renderer D draws on the CPU, and the client
 remembers that for a day. `render_options={"renderer": "wgsl"}`, or an
 `adapter` of `"software"` or `"name:..."`, keeps renderer D.
 
-When no adapter renders, or renderer D cannot draw the scene (a PLY or GLB it
-does not read, more splats than the GPU holds), the browser path is tried
+When no adapter renders, or renderer D cannot draw the scene (a PLY, WEM1 or
+HDRI it does not read, an object the server sent without its WEM1, more splats
+than the GPU holds), the browser path is tried
 (headless Chrome with its own SwiftShader) with a `RuntimeWarning`, and when
 that fails too, connect raises `RendererError` with the fixes:
 `apt install libvulkan1 mesa-vulkan-drivers`, the container settings, or

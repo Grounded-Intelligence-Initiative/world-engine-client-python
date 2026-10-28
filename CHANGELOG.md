@@ -1,29 +1,46 @@
 # Changelog
 
-## 0.6.0
+## 0.7.0
 
 - Renderer D: camera images from a server with renderer D (render protocol 2)
-  are drawn by `world_engine_client.render_wgsl.WGSLRenderer`, a WGSL splat
-  renderer on wgpu, in this process and without a browser. Splats are sorted
-  on the GPU, every camera is drawn in one frame, and the images are read
-  straight into numpy, one `(H, W, 3) uint8` per camera at its own size. On an
-  RTX 4090 the room scene of design doc 16 (1.5M splats, three 256×256
-  cameras) renders in about 7 ms, against 60–140 ms on the browser path. The
-  shaders ship in the package (`world_engine_client.wgsl`); a server never
-  sends shader code.
-- Meshes are drawn flat for now: renderer D's pipeline `wgsl/1` gives object
-  and robot-link meshes one colour per material under one fixed light, with
-  no PBR, environment lighting or shadows (those come in a later pipeline
-  version). Mesh pixels therefore differ from the browser path's: on the
-  room scene of design doc 16 by 33/255 on average where a mesh is in front,
-  against 1.7/255 in the splat region. To keep the browser path's images,
-  pass `render_options={"renderer": "chrome"}`.
+  are drawn by `world_engine_client.render_wgsl.WGSLRenderer`, a WGSL renderer
+  on wgpu, in this process and without a browser. Splats are sorted on the
+  GPU, every camera is drawn in one frame, and the images are read straight
+  into numpy, one `(H, W, 3) uint8` per camera at its own size. On an RTX 4090
+  the room scene of design doc 16 (1.5M splats, six objects and a Panda arm,
+  three 256×256 cameras) renders in about 6.6 ms with its meshes and shadow;
+  a whole step through a local `world-engine serve` runs at 54–70 steps/s,
+  against 4–6 on the browser path. The shaders ship in the package
+  (`world_engine_client.wgsl`); a server never sends shader code.
+- Meshes are drawn as the browser path's capture page draws them: three.js's
+  MeshStandardMaterial (base colour, metalness, roughness, normal, AO and
+  emissive maps, vertex colours, unlit and alpha-tested materials) from the
+  WEM1 the engine compiles each object GLB into, robot links with three's
+  painted finish, lit by the scene's own lighting baked at its light probe
+  (or its HDRI, or three's room environment when the probe is dark), with
+  design doc 14's local offsets, proxy boxes and scrolling belts. Renderer D
+  adds the key light's shadow, which the capture page does not draw.
+  Splats and meshes are blended above 8 bits (rgba16float on a GPU,
+  rgba32float on a CPU adapter) and rounded to 8 bits once.
+- How close: on design doc 16's room scene the images differ from the browser
+  path's by 1.7/255 on average in the splat region and 0.9/255 where a mesh
+  is in front (0.5/255 without the shadow); over nine test scenes the mesh
+  region stays within 1.1/255 of the capture page. An RTX 4090, Mesa's
+  lavapipe and the bundled SwiftShader differ by at most 0.1/255 in the
+  splat region and 0.6/255 where a mesh is, and the same state gives the
+  same pixels every run. To keep the browser path's images, pass
+  `render_options={"renderer": "chrome"}`.
 - Connect offers `render_protocols: [1, 2]` and `pipelines: ["wgsl/1"]`. A
   server from before renderer D ignores them and answers protocol 1: the
   browser path, as before. So does a newer server for a scene the pipeline
-  cannot draw (an HDRI, a SuperSplat compressed PLY, a mesh that is not a
-  GLB); it says why (`protocol_reason`), and the client passes that on in a
-  `RuntimeWarning` and in `info["render"]["reason"]`.
+  cannot draw as the capture page does (a SuperSplat compressed PLY, an
+  OpenEXR HDRI compressed with PIZ, PXR24, B44 or DWA, an object whose GLB
+  did not compile to WEM1, a lighting asset); it says why
+  (`protocol_reason`), and the client passes that on in a `RuntimeWarning`
+  and in `info["render"]["reason"]`.
+- A session of renderer D downloads the assets it draws: the splat, the
+  objects' WEM1, the robot links and an HDRI. The objects' GLBs, which only
+  the browser path reads, stay on the server.
 - No GPU is no error. The client looks for a GPU first and then for a
   software adapter: on Linux the system's Vulkan, the bundled loader with the
   system's drivers, Mesa's lavapipe, the bundled SwiftShader; on Windows WARP.
@@ -43,21 +60,29 @@
   driver. When Chrome renders in software too, renderer D draws, and that is
   remembered for a day. `render_options={"renderer": "wgsl"}` or an
   `adapter` of `"software"` or `"name:..."` keeps renderer D.
-- A scene renderer D cannot draw (a PLY or GLB it does not read, more splats
-  than the GPU holds) is drawn by the browser path, with a `RuntimeWarning`,
-  where Playwright is installed; `renderer="wgsl"` raises instead.
+- A scene renderer D cannot draw (a PLY, WEM1 or HDRI it does not read, an
+  object the server sent without its WEM1, more splats than the GPU holds)
+  is drawn by the browser path, with a `RuntimeWarning`, where Playwright is
+  installed; `renderer="wgsl"` raises instead.
 - The `render` extra now brings `wgpu==0.32.0` and, on Linux x86_64 and
-  aarch64, `world-engine-swiftshader` (a software Vulkan: SwiftShader and the
-  Khronos loader, 2 MB on x86_64, about 8 MB on aarch64). Renderer D adds
-  10.7 MB to an install that has numpy and Pillow on x86_64, 16.4 MB on
-  aarch64. Playwright and websockets stay in the extra for the browser path.
+  aarch64, `world-engine-swiftshader==0.1.0`. Renderer D adds 10.7 MB to an
+  install that has numpy and Pillow on x86_64, 16.4 MB on aarch64.
+  Playwright and websockets stay in the extra for the browser path.
+- New package `world-engine-swiftshader` 0.1.0, built and published from
+  this repository (`swiftshader/`, `.github/workflows/publish-swiftshader.yml`):
+  a software Vulkan for Linux, SwiftShader and the Khronos Vulkan loader built
+  from source, with their licences. Wheels for x86_64 (2 MB) and aarch64
+  (about 8 MB), glibc 2.28 and later. A machine with a GPU does not use it.
 - New `render_options`: `renderer` (`"auto"`, `"wgsl"`, `"chrome"`; default
   `WE_RENDERER`), `adapter` (`"auto"`, `"low-power"`, `"software"`,
   `"name:<part of the name>"`; default `WE_RENDER_ADAPTER`) and
-  `color_format`. `info["render"]` names the renderer and the adapter of each
-  step.
+  `color_format`. `info["render"]` names the renderer, the adapter of each
+  step and the lighting.
 - Renderer D decrypts the platform's assets into memory and uploads them to
   the GPU; no plain copy is written.
+
+## 0.6.0
+
 - Reads the DigiArena platform's encrypted scene assets (DAC1, AES-256-GCM).
   A connect with images now says `asset_encryption: ["dac1"]`. 0.5.0 and
   earlier get `client_upgrade_required` from the platform instead of images.
