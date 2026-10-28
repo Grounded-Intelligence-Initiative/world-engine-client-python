@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import warnings
 import zipfile
 from pathlib import Path
@@ -530,6 +531,102 @@ def test_the_two_paths_are_on_one_gpu_by_its_name(d, chrome, same):
         [_record("d", 1, d, 40.0, 0.3, 1.8), _record("chrome", 1, chrome, 9.0, 3, 2.7)]
     )
     assert s["same_gpu"]["same"] is same
+
+
+# ------------------------------------------------------------- a run that hangs
+class HungWorker:
+    """A worker that does not finish, as subprocess.Popen reports it on
+    Windows: communicate() times out, and the one after the kill returns the
+    output, as str in text mode. ``interrupt``: Ctrl-C while waiting."""
+
+    def __init__(self, cmd, interrupt=False, **kw):
+        self.args, self.pid, self.returncode, self.waits = cmd, 1 << 30, None, []
+        self.interrupt = interrupt
+        HungWorker.last = self
+
+    def communicate(self, input=None, timeout=None):
+        self.waits.append(timeout)
+        if self.interrupt:
+            raise KeyboardInterrupt
+        if len(self.waits) == 1:
+            raise subprocess.TimeoutExpired(self.args, timeout, output="", stderr="[chrome] hung\n")
+        self.returncode = 1
+        return "", "[chrome] hung\nthe GPU process did not answer\n"
+
+    def kill(self):
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+
+def test_a_run_that_times_out_is_kept_on_windows_too(monkeypatch):
+    """The record of a run that hung, with its output, where the timeout's
+    output is text (Windows) as well as bytes (POSIX); run.py went on."""
+    ended = []
+    monkeypatch.setattr(run.subprocess, "Popen", HungWorker)
+    monkeypatch.setattr(run, "kill_tree", ended.append, raising=False)
+    record = run.run_worker({"path": "chrome", "label": "x"}, {}, 1800)
+    assert record["ok"] is False and record["exit_code"] is None
+    assert record["error"]["type"] == "Timeout"
+    assert "the GPU process did not answer" in record["stderr_tail"]
+    assert "did not finish within 1800 s" in record["stderr_tail"]
+    assert ended == [HungWorker.last], "the run's processes were ended"
+
+
+def test_ctrl_c_ends_the_run_and_its_processes(monkeypatch):
+    ended = []
+    monkeypatch.setattr(run.subprocess, "Popen", lambda cmd, **kw: HungWorker(cmd, True))
+    monkeypatch.setattr(run, "kill_tree", ended.append, raising=False)
+    with pytest.raises(KeyboardInterrupt):
+        run.run_process(["worker"], {}, 60)
+    assert ended == [HungWorker.last]
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    stat = Path(f"/proc/{pid}/stat")
+    try:
+        return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"  # a zombie is gone
+    except (OSError, IndexError):
+        return True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups (Windows: taskkill /T)")
+def test_a_run_that_hangs_ends_with_every_process_it_started(tmp_path):
+    """A worker that hangs with a child of its own (Playwright's driver, the
+    browser): both end at the timeout, so the next runs are not slowed down."""
+    pid_file = tmp_path / "child.pid"
+    code = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "print('worker started', file=sys.stderr, flush=True)\n"
+        "time.sleep(300)\n"
+    )
+    started = time.monotonic()
+    rc, err = run.run_process([sys.executable, "-c", code], dict(os.environ), 3)
+    assert rc is None and time.monotonic() - started < 60
+    assert "worker started" in err and "did not finish within 3 s" in err
+    child = int(pid_file.read_text())
+    deadline = time.monotonic() + 10
+    while _alive(child) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not _alive(child), "the worker's child was ended too"
 
 
 # ------------------------------------------------ renderer D on this machine

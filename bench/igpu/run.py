@@ -21,6 +21,7 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -124,31 +125,85 @@ def round_order(keys: list[str], rnd: int) -> list[str]:
     return keys[shift:] + keys[:shift]
 
 
+def _text(data) -> str:
+    """A process's output as text: bytes, str (what Windows' communicate()
+    gives after a timeout in text mode) or None."""
+    if data is None:
+        return ""
+    return data.decode("utf-8", "replace") if isinstance(data, bytes) else str(data)
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """End a process and the processes it started (a worker, Playwright's
+    driver, the browser): its process group on POSIX, taskkill /T on Windows."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def run_process(cmd: list[str], env: dict, timeout: float) -> tuple[int | None, str]:
+    """(exit code, stderr) of ``cmd``. Past ``timeout`` seconds, or on Ctrl-C,
+    it ends with every process it started (it runs in a group of its own), so
+    a hung browser does not slow the next runs down; the exit code is None
+    then."""
+    if os.name == "nt":
+        group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        group = {"start_new_session": True}
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        **group,
+    )
+    try:
+        _, err = proc.communicate(timeout=timeout)
+        return proc.returncode, _text(err)
+    except subprocess.TimeoutExpired as exc:
+        kill_tree(proc)
+        try:
+            _, err = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired as again:  # something still holds the pipe
+            err = again.stderr or exc.stderr
+        note = f"\n[bench] the run did not finish within {timeout:.0f} s: it and the "
+        note += "processes it started were ended"
+        return None, _text(err) + note
+    except BaseException:  # Ctrl-C: the run's own group does not get it
+        kill_tree(proc)
+        raise
+
+
 def run_worker(spec: dict, env: dict, timeout: float) -> dict:
     with tempfile.TemporaryDirectory(prefix="igpu-bench-") as tmp:
         spec_file, out_file = Path(tmp) / "spec.json", Path(tmp) / "out.json"
         spec_file.write_text(json.dumps(spec))
         started = time.perf_counter()
-        try:
-            done = subprocess.run(
-                [sys.executable, str(HERE / "worker.py"), str(spec_file), str(out_file)],
-                env=env,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=timeout,
-            )
-            code, stderr = done.returncode, done.stderr
-        except subprocess.TimeoutExpired as exc:
-            code = None
-            stderr = (exc.stderr or b"").decode("utf-8", "replace") if exc.stderr else ""
-            stderr += f"\n[bench] the run did not finish within {timeout:.0f} s"
+        cmd = [sys.executable, str(HERE / "worker.py"), str(spec_file), str(out_file)]
+        code, stderr = run_process(cmd, env, timeout)
         wall = round(time.perf_counter() - started, 3)
         if out_file.exists():
             record = json.loads(out_file.read_text())
         else:
             record = {"path": spec["path"], "label": spec["label"], "ok": False}
-            record["error"] = {"type": "WorkerCrashed", "message": stderr[-4000:]}
+            kind = "Timeout" if code is None else "WorkerCrashed"
+            record["error"] = {"type": kind, "message": stderr[-4000:]}
     record.update(exit_code=code, wall_s=wall, stderr_tail=stderr[-4000:])
     return record
 

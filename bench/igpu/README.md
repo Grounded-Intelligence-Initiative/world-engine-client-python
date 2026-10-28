@@ -49,7 +49,10 @@ the reference states of both scenes and compares them with `refs/`. After the
 rounds, one more browser-path run (`chrome_png`) reads its images back
 losslessly, PNG in place of JPEG, to compare Spark here with Spark on the RTX
 4090. Speed is render only: the recorded trace replayed, no server, no physics:
-what drawing the cameras of one gym step costs.
+what drawing the cameras of one gym step costs. A run that takes longer than
+`--run-timeout` (1800 s) is ended together with the processes it started
+(Playwright's driver, the browser) and recorded as a `Timeout`, and the
+bench goes on with the next.
 
 The browser path uses the headless shell of the playwright that the `render`
 extra pins (Chrome Headless Shell 148), downloaded once into
