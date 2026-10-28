@@ -126,6 +126,10 @@
   dim, so in `osc_pose_abs` a sampled action could fail the server's check
   and Gymnasium's `check_env` failed. The spaces of a scene with one robot do
   not change.
+- The README and `connect()`'s docstring give the sum of an episode's rewards
+  when a staged task shapes by distance. In points (`normalize_reward=False`)
+  it is `earned - penalty + shaping["return"]`, and as the server sends them
+  `(earned - penalty + shaping["return"]) / max`. They said `earned - penalty`.
 
 ## 0.6.0
 

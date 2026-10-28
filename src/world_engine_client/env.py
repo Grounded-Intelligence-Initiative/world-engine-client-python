@@ -92,13 +92,18 @@ def connect(
 
     ``normalize_reward`` (default True) returns each reward as the server sends
     it. The server divides a ``staged`` reward by the task's total points, so an
-    episode that finishes sums to 1.0. With False a staged reward comes back in
-    points, ``reward * info["task_progress"]["reward"]["max"]``: the points the
-    step earned, less the failure penalty on the step that fails. A step that
-    gives partial credit back is negative without a failure. Over an episode
-    from :meth:`RemoteEnv.reset` they add up to ``earned - penalty`` of the last
-    ``info["task_progress"]["reward"]``. ``sparse`` and ``dense`` rewards, as
-    the env's ``reward_type`` names them, come back unchanged either way."""
+    episode that finishes sums to 1.0 before any distance shaping. With False a
+    staged reward comes back in points,
+    ``reward * info["task_progress"]["reward"]["max"]``: the points the step
+    earned, less the failure penalty on the step that fails. A step that gives
+    partial credit back is negative without a failure. Over an episode from
+    :meth:`RemoteEnv.reset` they add up to ``earned - penalty`` of the last
+    ``info["task_progress"]["reward"]``, plus ``shaping["return"]`` (the
+    shaping paid so far, in points) when the task shapes by distance; the
+    rewards as the server sends them then sum to
+    ``(earned - penalty + shaping["return"]) / max``. ``sparse`` and ``dense``
+    rewards, as the env's ``reward_type`` names them, come back unchanged
+    either way."""
     if render not in ("auto", "local"):
         raise ValueError("render must be 'auto' or 'local': servers no longer render camera images")
     if not isinstance(normalize_reward, bool):

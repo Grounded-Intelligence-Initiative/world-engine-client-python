@@ -363,8 +363,9 @@ names its kind: `"sparse"`, `"dense"` or `"staged"`. It is `None` without a
 task, and servers from before staged rewards do not send it. A `sparse` reward
 pays `success_reward` on success and a `dense` reward is the task template's
 distance shaping. A `staged` reward pays stage points. The server divides it
-by the task's total points, so an episode that finishes sums to 1.0. This is
-the default, and older clients get the same.
+by the task's total points, so an episode that finishes sums to 1.0 before any
+distance shaping (see below). This is the default, and older clients get the
+same.
 
 To get a staged reward in points, connect with `normalize_reward=False`:
 
@@ -382,7 +383,8 @@ pays the running total again, so holding a state that already scored earns
 nothing more. The running totals, in points, are in
 `info["task_progress"]["reward"]`: `earned`, `max`, `penalty` and
 `earned_by_stage`. After every step of an episode that started with `reset()`,
-the rewards so far add up to `earned - penalty` of that step's info, up to
+the rewards so far add up to `earned - penalty` of that step's info (plus
+`shaping["return"]` when the task shapes by distance, see below), up to
 floating-point rounding (compare with `math.isclose`).
 
 - The points of stages that end at reset come with the first step.
@@ -397,6 +399,15 @@ floating-point rounding (compare with `math.isclose`).
 - The switch is unrelated to Gymnasium's `NormalizeReward` wrapper, which
   scales rewards by a running estimate of the return's spread. The wrapper
   works on top of either setting.
+
+A staged task can also shape the reward by distance (`reward.shaping`). Each
+step then adds `(gamma * Psi_t - Psi_{t-1}) / max`, where Psi is a potential
+that grows as the current stage's chosen ends get closer, is 0 once the
+episode terminates and keeps its value when it is truncated.
+`info["task_progress"]["reward"]["shaping"]` reports `potential` (Psi now),
+`return` (the shaping paid so far) and `gamma`, in points. An episode's rewards
+then sum to `(earned - penalty + shaping["return"]) / max`, and with
+`normalize_reward=False` to `earned - penalty + shaping["return"]`.
 
 With `normalize_reward=False`, a staged step whose info has no usable
 `task_progress.reward.max` raises `ProtocolError`, and the next step needs a
