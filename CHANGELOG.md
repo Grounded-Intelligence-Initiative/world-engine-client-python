@@ -69,7 +69,8 @@
 - The `render` extra now brings `wgpu==0.32.0` and, on Linux x86_64 and
   aarch64, `world-engine-swiftshader==0.1.0`. Renderer D adds 10.7 MB to an
   install that has numpy and Pillow on x86_64, 16.4 MB on aarch64.
-  Playwright and websockets stay in the extra for the browser path.
+  Playwright and websockets stay in the extra for the browser path, so the
+  whole extra is about 60 MB on x86_64 and 65 MB on aarch64.
 - New package `world-engine-swiftshader` 0.1.0, built and published from
   this repository (`swiftshader/`, `.github/workflows/publish-swiftshader.yml`):
   a software Vulkan for Linux, SwiftShader and the Khronos Vulkan loader built
