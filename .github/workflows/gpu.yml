@@ -1,6 +1,7 @@
-# The GPU tier of renderer D (design doc 16 §9.6): the client's tests on a real
-# GPU, and the end-to-end speed against a local engine. GitHub's hosted runners
-# have no GPU, so this runs on demand on a self-hosted runner labelled "gpu"
+# The GPU tier of renderer D (design doc 16 §9.6): the adapter the probe finds on
+# a real GPU, and the client's renderer D tests drawn there. The end-to-end speed
+# needs an engine server and is measured outside this repository. GitHub's hosted
+# runners have no GPU, so this runs on demand on a self-hosted runner labelled "gpu"
 # (Linux, a GPU with a Vulkan driver, Python 3.12, Docker not needed). Without
 # such a runner, run the same commands on a GPU machine:
 #
