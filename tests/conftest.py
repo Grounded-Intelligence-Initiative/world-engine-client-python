@@ -199,6 +199,7 @@ def start_stub() -> ControlStub:
         def log_message(self, *args):
             pass
 
+    state.handler_class = Handler  # a test may set Handler.timeout: idle connections close
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()

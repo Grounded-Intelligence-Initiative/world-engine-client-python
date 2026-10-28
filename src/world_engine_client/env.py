@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import select
 import threading
 import time
 import urllib.parse
@@ -362,6 +363,7 @@ class RemoteEnv:
                 headers["Authorization"] = "Bearer " + self._access_provider()
             encoded = json.dumps(body, allow_nan=False).encode()
             started = time.perf_counter()
+            self._drop_closed_connection()
             try:
                 self._http.request("POST", self._prefix + path, body=encoded, headers=headers)
                 response = self._http.getresponse()
@@ -430,6 +432,24 @@ class RemoteEnv:
         timings["total_ms"] = (time.perf_counter() - started) * 1000
         self.last_timings = timings
         return reply
+
+    def _drop_closed_connection(self) -> None:
+        """Servers close keep-alive connections that stay idle (Node after
+        5 s), for instance while the renderer starts. A request sent on such
+        a socket is lost, and for a step or reset the client could not tell
+        whether it ran. Between requests nothing may arrive on the socket,
+        so a readable one has been closed by the server (or holds garbage):
+        open a new connection before sending. Nothing has been sent yet, so
+        this is no retry."""
+        sock = self._http.sock
+        if sock is None:
+            return
+        try:
+            readable, _, _ = select.select([sock], [], [], 0)
+        except (OSError, ValueError):
+            readable = [sock]
+        if readable:
+            self._http.close()
 
     def _open_render(self, path: str, headers: dict | None = None):
         """GET <server>/render<path> with this session's credentials, on its own
