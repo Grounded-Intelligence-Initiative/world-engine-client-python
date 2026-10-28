@@ -119,12 +119,16 @@ _installed = False
 # Playwright sends the session token in this header with every request the
 # page makes; the loopback HTTP server refuses requests without it.
 _TOKEN_HEADER = "X-World-Engine-Token"
+# What the loopback server fetches from the server for the page, besides the
+# session's assets: the page and the files of its build.
+_PAGE_FILE = re.compile(r"/index\.html|/assets/[A-Za-z0-9_-][A-Za-z0-9_.-]*")
 
 # websockets logs every handshake, its path included, when its logger is set
 # to DEBUG, and the path carries the session token. The WebSocket server logs
 # here instead, and this logger stops at INFO.
 _WS_LOG = logging.getLogger("world_engine_client.render.ws")
 _WS_LOG.setLevel(logging.INFO)
+log = logging.getLogger("world_engine_client.render")
 
 
 def _same_secret(sent: str, expected: str) -> bool:
@@ -175,12 +179,28 @@ def install_chromium() -> None:
         _installed = True
 
 
-def available() -> bool:
-    """True when the ``render`` extra is installed (Chrome is checked on start)."""
+_RENDER_MODULES = ("playwright", "websockets", "PIL")
+
+
+def _modules_found(modules: tuple[str, ...]) -> bool:
     import importlib.util
 
-    needed = ("playwright", "websockets", "PIL", "cryptography")
-    return all(importlib.util.find_spec(m) is not None for m in needed)
+    return all(importlib.util.find_spec(m) is not None for m in modules)
+
+
+def available() -> bool:
+    """True when the ``render`` extra is installed (Chrome is checked on start).
+    The extra includes cryptography, which the hosting platform's encrypted
+    scene assets need. A local ``world-engine serve`` sends its scene plain:
+    for that the rest is enough (:func:`_available_plain`)."""
+    return _modules_found(_RENDER_MODULES + ("cryptography",))
+
+
+def _available_plain() -> bool:
+    """True when a scene that arrives plain can be rendered here: the render
+    extra apart from cryptography. Kept apart from :func:`available`, which
+    tests elsewhere replace with a function of no arguments."""
+    return _modules_found(_RENDER_MODULES)
 
 
 def candidate_args(chrome_args=None, allow_software=True) -> list[list[str]]:
@@ -235,15 +255,6 @@ class LocalRenderer:
         auto_install: bool | None = None,
         timeout: float = 300.0,
     ):
-        if not available():
-            raise RendererError(
-                "local rendering needs the render extra",
-                code="renderer_unavailable",
-                fixes=_INSTALL_FIXES,
-            )
-        self._fetch = fetch
-        self._scene_init = scene_init
-        self._digests = dict(digests)
         mode = (bundle or {}).get("cache") or "plain"
         if mode not in ("encrypted", "plain"):
             raise RendererError(
@@ -258,6 +269,16 @@ class LocalRenderer:
                 code="client_upgrade_required",
                 fixes=["pip install -U 'world-engine-client[render]'"],
             )
+        if not available() and (mode == "encrypted" or not _available_plain()):
+            needs = (
+                "the server's encrypted scene assets need the render extra (cryptography)"
+                if _available_plain()
+                else "local rendering needs the render extra"
+            )
+            raise RendererError(needs, code="renderer_unavailable", fixes=_INSTALL_FIXES)
+        self._fetch = fetch
+        self._scene_init = scene_init
+        self._digests = dict(digests)
         # Other processes here can reach the loopback ports: only the page
         # gets this token, so only the page is served (BUG-32).
         self._token = secrets.token_urlsafe(32)
@@ -278,6 +299,7 @@ class LocalRenderer:
         self._console: list[str] = []
         self._failures: list[str] = []  # "<flag set> -> <error>" for each set that failed
         self._http = None
+        self._page_kept: dict[str, bytes] = {}  # page files served from memory
         self._render_seconds: list[float] = []
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
@@ -294,9 +316,11 @@ class LocalRenderer:
                 origin=origin,
             )
             # Downloads have their own limit (no new bytes for 60 s): a large
-            # scene on a slow line does not count against the start.
+            # scene on a slow line does not count against the start. So do the
+            # page's scripts: Playwright gives the page 30 s to load.
             try:
                 self.assets.prepare()
+                self._page_kept = self._prefetch_page()
             except (OSError, sqlite3.Error) as exc:  # a full disk, a broken index
                 raise RendererError(
                     f"the render cache failed: {exc}",
@@ -510,7 +534,13 @@ class LocalRenderer:
         query = f"captureOnly=1&ws=ws://127.0.0.1:{self._ws_port}/{self._token}"
         if accept_software:
             query += "&allowSoftware=1"
-        await self._page.goto(f"{origin}/index.html?{query}", wait_until="load")
+        try:
+            await self._page.goto(f"{origin}/index.html?{query}", wait_until="load")
+        except Exception as exc:  # noqa: BLE001 - Playwright's errors name the URL, token included
+            raise RendererError(
+                "the capture page did not load: " + self._redact(str(exc))[:1000],
+                code="renderer_unavailable",
+            ) from None
         deadline = time.monotonic() + self._timeout
         while self._ws is None and time.monotonic() < deadline:
             # The page opens its socket at the end of its start-up script. An
@@ -646,6 +676,24 @@ class LocalRenderer:
         await self._ws.send(json.dumps(state))
         return await fut
 
+    def _prefetch_page(self) -> dict[str, bytes]:
+        """index.html and the scripts it names, before Chrome starts. Returns
+        what the page gets from memory this session: index.html, and the
+        scripts as well when there is no cache to keep them in. A failure is
+        left to the page load, which fetches the file again and reports it."""
+        kept: dict[str, bytes] = {}
+        try:
+            html = kept["/index.html"] = self.assets.page_file("/index.html")
+            for ref in sorted(set(re.findall(rb'(?:src|href)="(/assets/[^"]+)"', html))):
+                path = ref.decode("ascii", "replace")
+                if _HASHED_PAGE_FILE.fullmatch(path):
+                    data = self.assets.page_file(path)
+                    if self.assets.cache is None:
+                        kept[path] = data
+        except Exception as exc:  # noqa: BLE001 - see above
+            log.info("fetching the capture page before Chrome starts failed: %s", exc)
+        return kept
+
     def _provide(self, path: str) -> tuple[int, object, str]:
         """``(length, body, content type)`` for a page request: ``body`` is
         bytes, or an iterator of verified plaintext pieces of a scene asset.
@@ -655,14 +703,14 @@ class LocalRenderer:
             ctype = "text/javascript"
         if path in self._digests:
             return self.assets.length(path), self.assets.open(path), ctype
-        if path.startswith(("/__asset/", "/__robot/")) or path == "/__key":
-            # Not one of this session's assets; the scene key is not the page's.
+        if not _PAGE_FILE.fullmatch(path):
+            # Fetched with this session's credentials: only the page's own
+            # files, never another asset, /__key or a path in another
+            # spelling (the server may decode %5F%5Fkey to __key).
             raise FileNotFoundError(path)
-        if _HASHED_PAGE_FILE.fullmatch(path):
+        data = self._page_kept.get(path)
+        if data is None:
             data = self.assets.page_file(path)
-        else:
-            with self._fetch(path) as response:
-                data = response.read()
         return len(data), data, ctype
 
     async def _stop(self):

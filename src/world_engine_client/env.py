@@ -269,10 +269,16 @@ class RemoteEnv:
         proto=_PROTO,
     ) -> None:
         local = bool(images or cameras)
+        dac1_ok = False
         if local:
             from . import render as local_render
 
-            if not local_render.available():
+            # The render extra includes cryptography for the platform's
+            # encrypted scene assets. A local world-engine serve sends its
+            # scene plain, so a session with it works without cryptography.
+            dac1_ok = local_render.available()
+            platform = self._access_provider is not None
+            if not dac1_ok and (platform or not local_render._available_plain()):
                 raise local_render.RendererError(
                     "camera images are rendered on this machine and need the render extra",
                     code="renderer_unavailable",
@@ -292,9 +298,11 @@ class RemoteEnv:
             body["obs_keys"] = list(obs_keys)
         if local:
             body["render"] = "client"
-            # This client reads the platform's encrypted scene assets (DAC1);
-            # a hosted engine refuses image sessions of clients that do not.
-            body["asset_encryption"] = ["dac1"]
+            # This client reads the platform's encrypted scene assets (DAC1)
+            # when cryptography is installed; a hosted engine refuses image
+            # sessions of clients that do not.
+            if dac1_ok:
+                body["asset_encryption"] = ["dac1"]
         reply = self._post("/control/connect", body, with_session=False)
         if reply.get("proto") != proto:
             raise ProtocolError("server did not honor the requested protocol")

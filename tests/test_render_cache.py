@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -325,6 +326,109 @@ def test_a_local_session_refuses_encrypted_bytes(stub, sim):
         connect(stub, platform=False)
     assert caught.value.code == "client_upgrade_required"
     assert "encrypted" in str(caught.value)
+
+
+def test_a_local_session_needs_no_cryptography(stub, sim, monkeypatch):
+    """A local world-engine serve sends its scene plain. Without cryptography
+    (the engine's own environment has none) such a session still draws, and
+    the client does not claim to read DAC1; a platform session says what is
+    missing before any request."""
+    from world_engine_client import render
+
+    monkeypatch.setattr(render, "available", lambda: False)  # no cryptography
+    monkeypatch.setattr(render, "_available_plain", lambda: True)
+    Platform(stub, encrypted=False)
+    received = session(stub, sim, platform=False)
+    assert all(received[url] == data for url, data in ALL.items())
+    assert "asset_encryption" not in stub.calls[0][1]
+    stub.calls.clear()
+    with pytest.raises(wec.RendererError, match="render extra"):
+        connect(stub)
+    assert stub.calls == []
+    Platform(stub)  # an encrypting server that a client without cryptography reaches
+    with pytest.raises(wec.WorldEngineClientError) as caught:
+        connect(stub, platform=False)
+    assert caught.value.code == "client_upgrade_required"
+
+
+def test_only_encrypted_assets_need_cryptography(monkeypatch):
+    import importlib.util
+
+    from world_engine_client import render
+
+    def find_spec(name, *args):
+        return None if name == "cryptography" else object()
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    assert render._available_plain() and not render.available()
+
+
+def test_a_renderer_for_encrypted_assets_says_it_needs_cryptography(monkeypatch):
+    """LocalRenderer used on its own (a native renderer reads assets the
+    same way) checks what the bundle needs before anything is fetched."""
+    from world_engine_client import render
+
+    monkeypatch.setattr(render, "available", lambda: False)  # no cryptography
+    monkeypatch.setattr(render, "_available_plain", lambda: True)
+    fetched = []
+    bundle = {"protocol": 1, "cache": "encrypted", "encryption": "dac1"}
+    with pytest.raises(wec.RendererError, match="cryptography") as caught:
+        render.LocalRenderer(fetched.append, {"type": "scene_init"}, {}, bundle=bundle)
+    assert caught.value.code == "renderer_unavailable" and fetched == []
+
+
+def test_a_page_that_does_not_load_names_no_token(stub, sim):
+    """Playwright's goto errors carry the page URL, whose query has the
+    WebSocket URL with the token."""
+    Platform(stub)
+    sim.goto_error = 'Page.goto: Timeout 30000ms exceeded.\n  - navigating to "{url}"'
+    with pytest.raises(wec.RendererError) as caught:
+        connect(stub)
+    (url, *_) = sim.goto_urls
+    token = url.rsplit("/", 1)[1].split("&", 1)[0]
+    assert len(token) >= 32
+    text = str(caught.value)
+    assert "Timeout 30000ms" in text and "<token>" in text and token not in text
+    shown = "".join(traceback.format_exception(caught.value))
+    assert token not in shown, "nor in the traceback"
+
+
+def test_the_page_scripts_are_fetched_before_chrome_starts(stub, sim):
+    """5.5 MB of scripts on first use: within Playwright's 30 s for loading
+    the page, a slow line failed the start. index.html once per session."""
+    from conftest import send_bytes
+
+    Platform(stub)
+    script = "/render/assets/sceneEnvironment-uFkXfr3L.js"
+    data = stub.files.pop(script)
+    chrome_started = []
+
+    def answer(h):
+        chrome_started.append(len(sim.pages) > 0)
+        send_bytes(h, data)
+
+    stub.gets[script] = answer
+    received = session(stub, sim)
+    assert received["/assets/sceneEnvironment-uFkXfr3L.js"] == data
+    assert chrome_started == [False], "fetched once, before Chrome started"
+    assert len(stub.get_calls("/render/index.html")) == 1
+
+
+def test_an_unusable_cache_dir_keeps_the_session_in_memory(stub, sim, tmp_path):
+    """The cache directory cannot be used (a file is in its way): the session
+    keeps everything in memory, says so once and writes nothing. The page's
+    scripts fetched before Chrome started are served from memory, not
+    downloaded a second time by the page."""
+    platform = Platform(stub)
+    blocker = tmp_path / "file"
+    blocker.write_text("not a directory")
+    with pytest.warns(RuntimeWarning, match="kept in memory"):
+        received = session(stub, sim, cache_dir=str(blocker / "cache"))
+    assert all(received[url] == data for url, data in ALL.items())
+    assert all(platform.downloads[url] == 1 for url in ALL)
+    for script in ("main-D-j9cs4x.js", "sceneEnvironment-uFkXfr3L.js"):
+        assert len(stub.get_calls("/render/assets/" + script)) == 1, script
+    assert plaintext_files(tmp_path, tempfile.gettempdir()) == []
 
 
 def test_a_warm_start_does_not_open_an_index_connection_per_file(stub, sim, monkeypatch):
@@ -706,27 +810,53 @@ def _proxy_get(env, path: str, token: str | None):
         return e.code, dict(e.headers), e.read()
 
 
-def test_the_loopback_http_server_serves_only_the_page(stub, sim):
-    platform = Platform(stub)
-    env = connect(stub)
+# A local engine as well as the platform: on 0.5.0 a local session was the
+# one that ran, and another process got the scene from it (BUG-32).
+SESSIONS = pytest.mark.parametrize("mode", ["platform", "local"])
+
+
+@SESSIONS
+def test_the_loopback_http_server_serves_only_the_page(stub, sim, mode):
+    platform = Platform(stub, encrypted=mode == "platform")
+    env = connect(stub, platform=mode == "platform")
     try:
         env.reset(seed=0)
+        before = len(stub.calls)
+        # Another process on this machine, without the session's token.
+        for path in ("/__asset/0.ply", "/index.html", "/__key", "/assets/main-D-j9cs4x.js"):
+            status, _, data = _proxy_get(env, path, None)
+            assert status == 403, f"{path} without the token: HTTP {status}, {len(data)} bytes"
+            assert ASSETS["/__asset/0.ply"][:16] not in data
+        assert len(stub.calls) == before, "nothing was fetched upstream for it"
         (headers,) = sim.headers[-1:]
         token = headers.get("X-World-Engine-Token")
         assert token and len(token) >= 32, "the page's context carries the session token"
-        before = len(stub.calls)
         for path in ("/__asset/0.ply", "/index.html", "/__key", "/assets/main-D-j9cs4x.js"):
-            for sent in (None, "", token[:-1] + ("A" if token[-1] != "A" else "B")):
+            for sent in ("", token[:-1] + ("A" if token[-1] != "A" else "B")):
                 status, _, data = _proxy_get(env, path, sent)
                 assert status == 403 and ASSETS["/__asset/0.ply"][:16] not in data, (path, sent)
         assert len(stub.calls) == before, "nothing was fetched upstream for them"
         status, reply_headers, data = _proxy_get(env, "/__asset/0.ply", token)
         assert status == 200 and data == ASSETS["/__asset/0.ply"]
         assert reply_headers["Cache-Control"] == "no-store"
-        for path in ("/__asset/not-in-the-bundle.ply", "/__key"):
+        # The page itself gets its files, and nothing else is fetched with the
+        # session's credentials: not another asset, not the key, not the key
+        # in another spelling (Next.js decodes %5F%5Fkey to __key).
+        for path in (
+            "/__asset/not-in-the-bundle.ply",
+            "/__robot/not-in-the-bundle.bin",
+            "/__key",
+            "/%5F%5Fkey",
+            "/__%6Bey",
+            "//__key",
+            "/assets/../__key",
+            "/assets/%2E%2E/__key",
+            "/editor.html",
+        ):
             status, _, _ = _proxy_get(env, path, token)
             assert status == 404, path
-        assert platform.key_requests == 1, "the page cannot ask for the key"
+        assert len(stub.calls) == before, [c[0] for c in stub.calls[before:]]
+        assert platform.key_requests == (1 if mode == "platform" else 0)
         assert platform.downloads["/__asset/0.ply"] == 1
     finally:
         env.close()
@@ -753,17 +883,17 @@ def _intrude(url: str, result: dict) -> None:
     asyncio.run(main())
 
 
-def test_another_local_process_cannot_answer_for_the_page(stub, sim):
+@SESSIONS
+def test_another_local_process_cannot_answer_for_the_page(stub, sim, mode):
     """BUG-32: the loopback WebSocket took any connection as the page's, and
     the next step's images came from whoever connected last."""
-    Platform(stub)
-    env = connect(stub)
+    Platform(stub, encrypted=mode == "platform")
+    env = connect(stub, platform=mode == "platform")
     try:
         env.reset(seed=0)
         port = env.renderer._ws_port
-        token = sim.ws_urls[-1].rsplit("/", 1)[1]
-        assert len(token) >= 32, "the page's WebSocket URL ends in the token"
-        for path in ("/", "/" + token[:-1], "/" + token + "x", "/ws"):
+
+        def intrude(path):
             result: dict = {}
             thread = threading.Thread(
                 target=_intrude, args=(f"ws://127.0.0.1:{port}{path}", result), daemon=True
@@ -776,6 +906,13 @@ def test_another_local_process_cannot_answer_for_the_page(stub, sim):
             thread.join(timeout=5)
             assert "connected" not in result, f"{path} was accepted"
             assert "403" in result.get("error", ""), result
+
+        for path in ("/", "/ws"):
+            intrude(path)
+        token = sim.ws_urls[-1].rsplit("/", 1)[1]
+        assert len(token) >= 32, "the page's WebSocket URL ends in the token"
+        for path in ("/" + token[:-1], "/" + token + "x", "/" + token.upper()):
+            intrude(path)
     finally:
         env.close()
 

@@ -50,9 +50,10 @@
   its own images into the observations. Both now need a random token of the
   session, which only the page gets. Others get 403. The token does not
   appear in errors or logs.
-- Assets are downloaded before Chrome starts, and the download no longer
-  counts against the renderer's start limit. A broken download resumes with
-  a byte range, up to 3 times; a server that sends nothing for 60 s fails it.
+- Assets and the capture page's scripts are downloaded before Chrome
+  starts, and the download no longer counts against the renderer's start
+  limit. A broken download resumes with a byte range, up to 3 times; a
+  server that sends nothing for 60 s fails it.
 - Fixed: servers close keep-alive connections that stay idle (Node after
   5 s), and the next request went out on the dead socket. A step or reset
   then raised `RecoveryRequiredError` although it never reached the server,
@@ -60,8 +61,12 @@
   did it to the first reset, which the end-to-end test showed with software
   rendering. The client now opens a new connection first when the server has
   closed the old one; it still never sends a request twice.
-- The loopback server answers with `Cache-Control: no-store`.
-- The `render` extra adds `cryptography`.
+- The loopback server answers with `Cache-Control: no-store`. For the page
+  it fetches only `index.html` and the files of the page's build from the
+  server.
+- The `render` extra adds `cryptography`. Only the platform's encrypted
+  assets need it: without it, a session with a local `world-engine serve`
+  still renders, and the client does not say that it reads DAC1.
 - `RendererError` is defined in `world_engine_client.errors` (still
   importable from `world_engine_client.render`). New: `RenderFetchError`,
   an error status from the server's `/render/` routes.

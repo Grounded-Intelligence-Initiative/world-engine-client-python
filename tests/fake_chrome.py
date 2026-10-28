@@ -53,6 +53,8 @@ class Sim:
         self.failed: dict[str, object] = {}
         self.headers: list[dict] = []  # extra_http_headers of each page
         self.ws_urls: list[str] = []
+        self.goto_urls: list[str] = []
+        self.goto_error: str | None = None  # goto raises this, {url} filled in
         self.gpu = "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4090/PCIe/SSE2, OpenGL ES 3.2)"
         self.color = (40, 120, 200)
         self.pages: list[FakePage] = []
@@ -97,6 +99,9 @@ class FakePage:
         self.handlers[event] = handler
 
     async def goto(self, url, **_):
+        self.browser.sim.goto_urls.append(url)
+        if self.browser.sim.goto_error is not None:
+            raise RuntimeError(self.browser.sim.goto_error.format(url=url))
         parts = urllib.parse.urlsplit(url)
         query = urllib.parse.parse_qs(parts.query)
         origin = f"{parts.scheme}://{parts.netloc}"
@@ -172,7 +177,9 @@ def frame(state: dict, color) -> bytes:
 
 def install(monkeypatch=None) -> Sim:
     """Replace Playwright (only) with the stand-in; returns the shared Sim.
-    With ``monkeypatch`` the change is undone after the test."""
+    With ``monkeypatch`` the change is undone after the test. render.available
+    is replaced by a function of no arguments, as the engine's tests do: the
+    client must keep calling it so."""
     from world_engine_client import render
 
     SIM.reset()

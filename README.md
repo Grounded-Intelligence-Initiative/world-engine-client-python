@@ -76,6 +76,9 @@ browser tab is open, and the images never travel over the network. This needs th
 pip install 'world-engine-client[render]'
 ```
 
+The extra includes `cryptography`, which reads the platform's encrypted scene
+assets. A session with a local `world-engine serve` works without it.
+
 An installed Google Chrome is used if there is one. Otherwise the first session
 downloads Playwright's Chromium (about 300 MB, once, with progress in the
 terminal). Set `WE_RENDER_AUTO_INSTALL=0` or pass
@@ -93,12 +96,14 @@ on the machine can reach both ports, so both need a random token of this
 session: Playwright adds it to every request the page makes, and the
 WebSocket URL the page gets ends in it. Requests and connections without it
 get 403. Without the token, another local process cannot read the scene or
-put its own images into your observations.
+put its own images into your observations. For the page, the loopback server
+fetches only the page and the files of its build from the server.
 
 ### The render cache
 
-The client downloads the scene's assets before Chrome starts and keeps them
-in the render cache, so the next session of the same scene downloads nothing.
+The client downloads the scene's assets and the capture page's scripts
+before Chrome starts and keeps them in the render cache, so the next session
+of the same scene downloads nothing.
 The cache is `<user cache dir>/digiarena/render/`: `$XDG_CACHE_HOME` or
 `~/.cache` on Linux, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows.
 `DIGIARENA_CACHE_DIR` or `render_options={"cache_dir": "..."}` moves it.

@@ -107,6 +107,7 @@ def test_images_are_rendered_locally(client_render):
 @pytest.mark.parametrize("kw", [{"images": True}, {"cameras": ["front"]}])
 def test_images_without_the_extra_fail_before_any_request(stub, monkeypatch, kw):
     monkeypatch.setattr(render_module, "available", lambda: False)
+    monkeypatch.setattr(render_module, "_available_plain", lambda: False)
     with pytest.raises(wec.RendererError, match=r"render\]"):
         wec.connect("secret", url=stub.url, **kw)
     assert stub.calls == []
@@ -389,6 +390,25 @@ def test_missing_system_libraries_point_to_with_deps(downloads):
     with pytest.raises(wec.RendererError, match="--with-deps"):
         asyncio.run(_renderer_with(FakeChromium(installed=True, broken=broken))._launch([]))
     assert downloads == [], "a present but unusable Chromium is not downloaded again"
+
+
+def test_the_download_flag_is_its_own(monkeypatch):
+    """install_chromium() remembers a download in a module flag that starts
+    False. Nothing else in the module may take its name: the download would
+    never run, and available() would break after one. The tests above set
+    the flag themselves, so they would not notice."""
+    calls = []
+    monkeypatch.setattr(render_module, "_installed", render_module._installed)  # restored
+    monkeypatch.setattr(
+        render_module.subprocess,
+        "run",
+        lambda cmd, **_: calls.append(cmd) or type("Done", (), {"returncode": 0})(),
+    )
+    assert render_module._installed is False
+    render_module.install_chromium()
+    render_module.install_chromium()
+    assert [cmd[-3:] for cmd in calls] == [["playwright", "install", "chromium"]]
+    assert isinstance(render_module.available(), bool)
 
 
 def test_a_failed_download_says_how_to_do_it_by_hand(monkeypatch):
