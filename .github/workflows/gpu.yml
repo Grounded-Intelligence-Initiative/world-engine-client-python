@@ -1,0 +1,41 @@
+# The GPU tier of renderer D (design doc 16 §9.6): the client's tests on a real
+# GPU, and the end-to-end speed against a local engine. GitHub's hosted runners
+# have no GPU, so this runs on demand on a self-hosted runner labelled "gpu"
+# (Linux, a GPU with a Vulkan driver, Python 3.12, Docker not needed). Without
+# such a runner, run the same commands on a GPU machine:
+#
+#   pip install -e '.[render,gym]' pytest
+#   WE_TEST_REQUIRE_WGSL=1 WE_TEST_EXPECT_ADAPTER=system python -m pytest tests/test_render_wgsl.py
+name: gpu
+
+on:
+  workflow_dispatch:
+    inputs:
+      adapter:
+        description: "adapter preference passed as WE_RENDER_ADAPTER (auto, low-power, name:<part of the name>)"
+        default: auto
+
+permissions:
+  contents: read
+
+jobs:
+  gpu:
+    runs-on: [self-hosted, linux, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m venv .venv && .venv/bin/pip install -e '.[render,gym]' pytest
+      - name: which adapter renders
+        run: |
+          .venv/bin/python src/world_engine_client/wgsl/_probe.py --pick hardware --out probe.json
+          cat probe.json
+      - name: the client draws on the GPU
+        run: .venv/bin/python -m pytest tests/test_render_wgsl.py tests/test_wgsl_vendored.py
+        env:
+          WE_TEST_REQUIRE_WGSL: "1"
+          WE_TEST_EXPECT_ADAPTER: system
+          WE_RENDER_ADAPTER: ${{ inputs.adapter }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gpu-probe
+          path: probe.json

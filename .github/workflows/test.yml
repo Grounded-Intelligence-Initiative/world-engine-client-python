@@ -16,14 +16,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      # cryptography: the cache and DAC1 tests run here too, without a browser.
+      # cryptography: the cache and DAC1 tests run here too, without a renderer.
       - run: pip install -e '.[img,gym]' pytest ruff cryptography
       - run: ruff check .
       - run: python -m pytest
 
-  # The render extra on every supported Python, and a real headless Chrome.
-  # The runners have no GPU, so the Chrome test also covers software rendering.
+  # world-engine-swiftshader for the render jobs, built from its pinned sources the
+  # way publish-swiftshader.yml builds the release (cached by those sources). The
+  # render extra depends on it on Linux, so pip finds it here before PyPI has it.
+  swiftshader:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: swiftshader/src/world_engine_swiftshader/lib
+          key: sws-x86_64-${{ hashFiles('swiftshader/sources.env', 'swiftshader/scripts/build.sh') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: swiftshader/scripts/build.sh "$RUNNER_TEMP/sws" "$(nproc)"
+      - run: pip install build && python -m build --wheel swiftshader -o dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swiftshader-x86_64
+          path: dist/*.whl
+
+  # The CPU tier: renderer D on Mesa's lavapipe (the runners have no GPU), and the
+  # browser path in a real headless Chrome, on every supported Python.
   render:
+    needs: swiftshader
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -33,9 +57,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e '.[render,gym]' pytest
-      - run: python -c "from world_engine_client import render; assert render.available()"
+      - uses: actions/download-artifact@v4
+        with:
+          name: swiftshader-x86_64
+          path: dist
+      - run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libvulkan1 mesa-vulkan-drivers
+      - run: pip install dist/world_engine_swiftshader-*.whl && pip install -e '.[render,gym]' pytest
+      - run: python -c "from world_engine_client import render, render_wgsl; assert render.available() and render_wgsl.available()"
       - run: python -m playwright install --with-deps --only-shell chromium
       - run: python -m pytest
         env:
           WE_TEST_REQUIRE_CHROME: "1"
+          WE_TEST_REQUIRE_WGSL: "1"
+          WE_TEST_EXPECT_ADAPTER: lavapipe
+
+  # Renderer D with nothing but the bundled software Vulkan: no system loader, no
+  # driver (a minimal system, a container without libvulkan1).
+  render-swiftshader:
+    needs: swiftshader
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: swiftshader-x86_64
+          path: dist
+      - name: no system Vulkan
+        run: |
+          sudo apt-get purge -y -q libvulkan1 mesa-vulkan-drivers || true
+          if python -c "import ctypes; ctypes.CDLL('libvulkan.so.1')" 2>/dev/null; then
+            echo "a system Vulkan loader is still there"; exit 1
+          fi
+      - run: pip install dist/world_engine_swiftshader-*.whl && pip install -e '.[render,gym]' pytest
+      - run: python -m pytest tests/test_render_wgsl.py tests/test_wgsl_vendored.py
+        env:
+          WE_TEST_REQUIRE_WGSL: "1"
+          WE_TEST_EXPECT_ADAPTER: swiftshader

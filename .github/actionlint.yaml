@@ -1,0 +1,4 @@
+# The GPU tier (workflows/gpu.yml) runs on a self-hosted runner with this label.
+self-hosted-runner:
+  labels:
+    - gpu

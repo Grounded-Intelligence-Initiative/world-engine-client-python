@@ -1,0 +1,109 @@
+# Renderer D where test.yml does not reach: Windows without a GPU (WARP) and
+# Linux on arm64 (lavapipe and the bundled SwiftShader). GitHub's runners have no
+# GPU, so every job here renders in software.
+#
+#   windows: wgpu with force_fallback_adapter gets WARP, the "Microsoft Basic
+#            Render Driver" (D3D12). The adapter probe renders a frame with it,
+#            then the client's own tests draw the D scene through connect(). A
+#            last step repeats the probe with NuGet's WARP 1.0.20 next to
+#            python.exe (what gfx-rs/wgpu's CI uses), to tell an old system WARP
+#            from a real failure.
+#   linux arm64: world-engine-swiftshader built natively for aarch64 (LLVM 10
+#            backend; cached by its sources), then the client's tests on Mesa's
+#            lavapipe and on the bundled SwiftShader alone.
+name: software-render
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-warp:
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-latest, python-version: "3.11", experimental: false}
+          - {os: windows-latest, python-version: "3.12", experimental: false}
+          # wgpu 0.32.0 ships a win_arm64 wheel; the runner is free for public repositories
+          - {os: windows-11-arm, python-version: "3.12", experimental: true}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[render,gym]" pytest
+      - name: system WARP version (informational)
+        continue-on-error: true
+        shell: pwsh
+        run: (Get-Item "$env:WINDIR\System32\d3d10warp.dll").VersionInfo | Format-List FileVersion, ProductVersion
+      - name: the adapter probe renders with WARP
+        shell: bash
+        run: |
+          python src/world_engine_client/wgsl/_probe.py --pick fallback --out warp.json
+          python -c "import json,sys; d=json.load(open('warp.json')); print(json.dumps(d, indent=1)); p=d.get('picked') or {}; a=p.get('adapter') or {}; sys.exit(0 if d.get('ok') and a.get('adapter_type') == 'CPU' and a.get('backend_type') == 'D3D12' else 1)"
+      - name: the client draws through connect() with WARP
+        run: python -m pytest tests/test_render_wgsl.py tests/test_wgsl_vendored.py
+        env:
+          WE_TEST_REQUIRE_WGSL: "1"
+          WE_TEST_EXPECT_ADAPTER: warp
+      - name: the probe with NuGet WARP 1.0.20 next to python.exe (informational)
+        if: always() && runner.arch == 'X64'
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -fsSL --retry 5 -o warp.zip https://www.nuget.org/api/v2/package/Microsoft.Direct3D.WARP/1.0.20
+          tar -xf warp.zip build/native/bin/x64/d3d10warp.dll
+          PYDIR=$(python -c "import sys, os; print(os.path.dirname(sys.executable))")
+          cp build/native/bin/x64/d3d10warp.dll "$PYDIR/"
+          python src/world_engine_client/wgsl/_probe.py --pick fallback --out warp-nuget.json
+          cat warp-nuget.json
+          rm -f "$PYDIR/d3d10warp.dll"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: software-render-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: "warp*.json"
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: swiftshader/src/world_engine_swiftshader/lib
+          key: sws-aarch64-${{ hashFiles('swiftshader/sources.env', 'swiftshader/scripts/build.sh') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: swiftshader/scripts/build.sh "$RUNNER_TEMP/sws" "$(nproc)"
+      - run: pip install build && python -m build --wheel swiftshader -o dist
+      - run: pip install dist/world_engine_swiftshader-*.whl && pip install -e ".[render,gym]" pytest
+      - run: python swiftshader/scripts/check_wheel.py dist/world_engine_swiftshader-*.whl --max-mb 9 --render
+      - name: renderer D on lavapipe
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libvulkan1 mesa-vulkan-drivers
+          python -m pytest tests/test_render_wgsl.py tests/test_wgsl_vendored.py
+        env:
+          WE_TEST_REQUIRE_WGSL: "1"
+          WE_TEST_EXPECT_ADAPTER: lavapipe
+      - name: renderer D on the bundled SwiftShader alone
+        run: |
+          sudo apt-get purge -y -q libvulkan1 mesa-vulkan-drivers || true
+          python -m pytest tests/test_render_wgsl.py tests/test_wgsl_vendored.py
+        env:
+          WE_TEST_REQUIRE_WGSL: "1"
+          WE_TEST_EXPECT_ADAPTER: swiftshader
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swiftshader-aarch64-ci
+          path: dist/*.whl
