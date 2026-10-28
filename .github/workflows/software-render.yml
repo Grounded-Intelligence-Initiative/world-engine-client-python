@@ -52,7 +52,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[render,gym]" pytest
+      # cryptography from a wheel only: since 46.0.4 it has none for win_arm64, and
+      # pip would build it from source (no OpenSSL on the runner). 46.0.3 is the
+      # newest with one; x64 takes the newest as before.
+      - run: pip install --only-binary=cryptography -e ".[render,gym]" pytest
       - name: system WARP version (informational)
         continue-on-error: true
         shell: pwsh
@@ -97,7 +100,7 @@ jobs:
         shell: bash
         run: |
           curl -fsSL --retry 5 -o warp.zip https://www.nuget.org/api/v2/package/Microsoft.Direct3D.WARP/1.0.20
-          tar -xf warp.zip build/native/bin/x64/d3d10warp.dll
+          python -c "import zipfile; zipfile.ZipFile('warp.zip').extract('build/native/bin/x64/d3d10warp.dll')"
           PYDIR=$(python -c "import sys, os; print(os.path.dirname(sys.executable))")
           cp build/native/bin/x64/d3d10warp.dll "$PYDIR/"
           python src/world_engine_client/wgsl/_probe.py --pick fallback --out warp-nuget.json

@@ -634,6 +634,8 @@ def test_the_adapter_search_keeps_its_result_in_a_private_cache(monkeypatch, tmp
     root = tmp_path / "new" / "digiarena" / "render"
     _, choice = render_wgsl.open_adapter(cache_dir=root)
     assert choice.step == "system" and (root / "adapters.json").is_file()
+    if os.name == "nt":
+        return  # no POSIX modes; what is under the user's profile is private by its ACL
     for made in (tmp_path / "new", root.parent, root):
         assert stat.S_IMODE(made.stat().st_mode) == 0o700, made
     assert stat.S_IMODE((root / "adapters.json").stat().st_mode) == 0o600
