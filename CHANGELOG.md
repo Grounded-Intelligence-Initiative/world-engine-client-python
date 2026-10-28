@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0
+
+- New: `connect(..., normalize_reward=True)`. With `normalize_reward=False`, a
+  task with a `staged` reward returns its rewards in points: each reward times
+  `info["task_progress"]["reward"]["max"]`, the task's total points. A step pays
+  the points it earned, less the failure penalty on the step that fails, so the
+  rewards of an episode add up to `earned - penalty` of its last
+  `info["task_progress"]["reward"]`. `sparse` and `dense` rewards come back
+  unchanged, and so does every reward with the default. The server still sends
+  normalized rewards, so older clients see no change.
+- `normalize_reward` takes `True` or `False` only. Anything else raises
+  `TypeError` before any request.
+- With `normalize_reward=False`, a staged step whose info has no usable
+  `task_progress.reward.max` raises `ProtocolError`, and the next step needs a
+  `reset()`. Servers with staged rewards always send it.
+- The README has a new section on rewards.
+
 ## 0.5.0
 
 - Python 3.11 or newer is required. Python 3.10 reaches its end of life in
