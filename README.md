@@ -82,7 +82,17 @@ reads the images straight into numpy, `(H, W, 3) uint8` per camera, each camera
 at its own size. The shaders ship inside this package (`world_engine_client.wgsl`,
 a copy of the engine's); the client never runs a shader a server sends. Older
 servers (render protocol 1) get the browser path below. `info["render"]` says
-which renderer and which adapter drew the step.
+which renderer and which adapter drew the step, and `reason` why, when it is
+not the obvious one.
+
+Renderer D's pipeline `wgsl/1` draws meshes (objects, robot links) flat for
+now: one colour per material, one fixed light, no PBR, environment lighting
+or shadows, which a later pipeline version brings. Its mesh pixels differ from
+the browser path's (on design doc 16's room scene by 33/255 on average where a
+mesh is in front; 1.7/255 in the splat region). `render_options={"renderer":
+"chrome"}` keeps the browser path's images. A newer server answers protocol 1
+for a scene `wgsl/1` cannot draw (an HDRI, a SuperSplat compressed PLY, a mesh
+that is not a GLB) and says why; the client warns once with that reason.
 
 Which adapter draws: a GPU first, then a software one. On Linux the client
 tries the system's Vulkan loader with the GPU's driver, the bundled loader with
@@ -99,12 +109,26 @@ warm-up when the rendering is slower than real time (29.4 steps per second, one
 step per 0.034 s), naming the adapter, its type and the measured rate. On a
 machine with an NVIDIA GPU that Vulkan cannot reach, the warning says to
 install `libx11-6 libxext6 libegl1` and, in a container, to add `graphics` to
-`NVIDIA_DRIVER_CAPABILITIES`.
+`NVIDIA_DRIVER_CAPABILITIES`. The probes import wgpu from where your process
+does (its `sys.path`), so `pip install --user` and `PYTHONPATH` installs work.
 
-When no adapter renders, the browser path is tried (headless Chrome with its
-own SwiftShader), and when that fails too, connect raises `RendererError` with
-the fixes: `apt install libvulkan1 mesa-vulkan-drivers`, the container
-settings, or `images=False` for a state-only session.
+A Linux machine can show a GPU (a `/dev/dri/renderD*` node, `/dev/nvidiactl`)
+that Vulkan does not reach: a GPU without its Vulkan driver
+(`apt install mesa-vulkan-drivers` brings the Intel and AMD ones), a virtual
+GPU, an old one. Renderer D would then draw on the CPU, while Chrome may reach
+the GPU through OpenGL, an order of magnitude faster. So in that case the
+client first starts the browser path with hardware WebGL only: if Chrome
+reaches the GPU, it draws, with one `RuntimeWarning` that says how to get
+renderer D onto the GPU; if not, renderer D draws on the CPU, and the client
+remembers that for a day. `render_options={"renderer": "wgsl"}`, or an
+`adapter` of `"software"` or `"name:..."`, keeps renderer D.
+
+When no adapter renders, or renderer D cannot draw the scene (a PLY or GLB it
+does not read, more splats than the GPU holds), the browser path is tried
+(headless Chrome with its own SwiftShader) with a `RuntimeWarning`, and when
+that fails too, connect raises `RendererError` with the fixes:
+`apt install libvulkan1 mesa-vulkan-drivers`, the container settings, or
+`images=False` for a state-only session.
 
 `render_options` for renderer D: `adapter` picks the adapter (`"auto"`,
 `"low-power"` for an integrated GPU first, `"software"`, or `"name:Intel"` for

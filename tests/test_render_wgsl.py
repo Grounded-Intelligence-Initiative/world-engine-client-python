@@ -173,6 +173,18 @@ def chrome(monkeypatch):
     return FakeChrome
 
 
+def _choice(step, device, kind, software):
+    from world_engine_client.wgsl import adapters
+
+    return adapters.AdapterChoice(
+        step=step, device=device, adapter_type=kind, backend="Vulkan", software=software
+    )
+
+
+GPU = _choice("system", "NVIDIA GeForce RTX 4090", "DiscreteGPU", False)
+SWS = _choice("swiftshader", "SwiftShader Device (Subzero)", "CPU", True)
+
+
 def no_adapter(**kw):
     raise render_wgsl.NoRenderAdapter(
         "no GPU or software adapter renders camera images here",
@@ -186,7 +198,7 @@ def no_adapter(**kw):
 
 def test_without_an_adapter_the_browser_path_draws(stub, chrome, monkeypatch):
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "open_adapter", no_adapter)
+    monkeypatch.setattr(render_wgsl, "find_adapter", no_adapter)
     DPlatform(stub)
     with warnings.catch_warnings(record=True) as log:
         warnings.simplefilter("always")
@@ -203,7 +215,7 @@ def test_without_an_adapter_the_browser_path_draws(stub, chrome, monkeypatch):
 
 def test_when_nothing_renders_the_error_names_the_fixes(stub, chrome, monkeypatch):
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "open_adapter", no_adapter)
+    monkeypatch.setattr(render_wgsl, "find_adapter", no_adapter)
 
     class NoChrome(FakeChrome):
         def __init__(self, *a, **k):
@@ -236,7 +248,7 @@ def test_when_nothing_renders_the_error_names_the_fixes(stub, chrome, monkeypatc
 
 def test_renderer_wgsl_does_not_fall_back(stub, chrome, monkeypatch):
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "open_adapter", no_adapter)
+    monkeypatch.setattr(render_wgsl, "find_adapter", no_adapter)
     platform = DPlatform(stub)
     with pytest.raises(render_wgsl.NoRenderAdapter, match="apt install libvulkan1"):
         wec.connect(
@@ -323,8 +335,11 @@ def test_render_options_go_to_the_renderer_that_uses_them(stub, monkeypatch):
         def close(self):
             pass
 
+    searched = {}
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
     monkeypatch.setattr(render_wgsl, "WGSLRenderer", D)
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: searched.update(kw) or GPU)
+    monkeypatch.setattr(render_wgsl, "open_adapter", lambda **kw: (object(), kw["choice"]))
     monkeypatch.setenv("WE_RENDER_ADAPTER", "name:Intel")
     DPlatform(stub)
     env = wec.connect(
@@ -337,6 +352,8 @@ def test_render_options_go_to_the_renderer_that_uses_them(stub, monkeypatch):
     env.close()
     assert seen["adapter"] == "name:Intel" and seen["color_format"] == "rgba8unorm"
     assert seen["timeout"] == 9 and "chrome_args" not in seen
+    assert seen["opened"][1] is GPU, "the adapter the search found"
+    assert searched["adapter"] == "name:Intel" and searched["timeout"] == 9
 
 
 def test_open_adapter_says_what_failed_and_how_to_fix_it(monkeypatch, tmp_path):
@@ -399,3 +416,213 @@ def test_the_adapter_search_keeps_its_result_in_a_private_cache(monkeypatch, tmp
     for made in (tmp_path / "new", root.parent, root):
         assert stat.S_IMODE(made.stat().st_mode) == 0o700, made
     assert stat.S_IMODE((root / "adapters.json").stat().st_mode) == 0o600
+
+
+# ------------------------------------- scenes D cannot draw, servers that say so
+def compressed_ply(n=256) -> bytes:
+    """A SuperSplat compressed PLY (Spark draws these; wgsl/1 does not read them)."""
+    props = ("min_x", "min_y", "min_z", "max_x", "max_y", "max_z")
+    head = (
+        "ply\nformat binary_little_endian 1.0\nelement chunk 1\n"
+        + "".join(f"property float {p}\n" for p in props)
+        + f"element vertex {n}\n"
+        + "".join(f"property uint packed_{p}\n" for p in ("position", "rotation", "scale", "color"))
+        + "end_header\n"
+    )
+    return head.encode() + bytes(4 * len(props) + 16 * n)
+
+
+def test_a_scene_d_cannot_read_is_drawn_by_the_browser_path(stub, chrome, monkeypatch):
+    """A server that answered protocol 2 for a splat D does not read (an
+    engine that looked only at the URL's suffix): Chrome draws it, with a
+    warning that says why, instead of connect failing on asset_mismatch."""
+    import d_scene
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            render_wgsl.open_adapter(cache_dir=Path(tempfile.gettempdir()) / "probe")
+    except render_wgsl.NoRenderAdapter as exc:
+        if REQUIRED:
+            pytest.fail(f"WE_TEST_REQUIRE_WGSL=1 but no adapter renders: {exc}")
+        pytest.skip(f"no adapter renders here: {exc}")
+    monkeypatch.setitem(d_scene.ASSETS, "/__asset/0.ply", compressed_ply())
+    platform = DPlatform(stub, encrypted=False)
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        env = wec.connect("secret", url=stub.url, images=True)
+    try:
+        assert platform.offers[0]["render_protocols"] == [1, 2]
+        assert isinstance(env.renderer, FakeChrome)
+        texts = [str(w.message) for w in log if issubclass(w.category, RuntimeWarning)]
+        assert any("headless Chrome instead" in t and "chunk" in t for t in texts), texts
+        _, info = env.reset(seed=0)
+        assert info["render"]["renderer"] == "chrome" and "chunk" in info["render"]["reason"]
+    finally:
+        env.close()
+
+
+def test_a_server_that_declines_d_for_a_scene_says_why(stub, chrome, monkeypatch):
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    reason = "pipeline wgsl/1 does not read the scene's splat PLY: element 'chunk' first"
+    platform = DPlatform(stub)
+    stub.responders["/control/connect"] = lambda body: _declined(platform._connect(body), reason)
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        env = wec.connect("secret", url=stub.url, images=True, access_provider=lambda: "scoped")
+    try:
+        assert isinstance(env.renderer, FakeChrome)
+        texts = [str(w.message) for w in log if issubclass(w.category, RuntimeWarning)]
+        assert any(reason in t and "not with renderer D" in t for t in texts), texts
+        _, info = env.reset(seed=0)
+        assert reason in info["render"]["reason"]
+    finally:
+        env.close()
+
+
+def _declined(reply, reason):
+    reply["render"].update(protocol=1, protocol_reason=reason)
+    reply["render"].pop("pipeline", None)
+    return reply
+
+
+def test_a_client_without_the_browser_path_hears_why_the_server_declined(stub, monkeypatch):
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    monkeypatch.setattr(render_module, "_available_plain", lambda: False)
+    reason = "the scene has an HDRI, which pipeline wgsl/1 does not draw"
+    platform = DPlatform(stub)
+    stub.responders["/control/connect"] = lambda body: _declined(platform._connect(body), reason)
+    with pytest.raises(wec.RendererError) as caught:
+        wec.connect("secret", url=stub.url, images=True, access_provider=lambda: "scoped")
+    text = str(caught.value)
+    assert reason in text and "upgrade the server" not in text
+    assert "playwright" in text and "images=False" in text
+
+
+# ---------------------------------- a GPU that Vulkan misses and Chrome reaches
+class ChromeOnTheGPU(FakeChrome):
+    def __init__(self, fetch, scene_init, digests, **options):
+        super().__init__(fetch, scene_init, digests, **options)
+        self.gpu = "ANGLE (Intel, Mesa Intel(R) UHD Graphics (TGL GT1), OpenGL 4.6)"
+
+
+class ChromeInSoftware(FakeChrome):
+    def __init__(self, fetch, scene_init, digests, **options):
+        FakeChrome.instances.append(self)
+        self.options = options
+        assert options.get("allow_software") is False
+        raise wec.RendererError("software renderer (SwiftShader)", code="software_renderer")
+
+
+@pytest.fixture
+def vulkan_misses_the_gpu(chrome, monkeypatch, tmp_path):
+    """D's search ends on the bundled SwiftShader; the machine shows a DRM
+    render node. Records which D steps ran."""
+    from world_engine_client.wgsl import adapters
+
+    ran = []
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: ran.append("search") or SWS)
+
+    def opened(**kw):
+        ran.append("open")
+        return object(), kw["choice"]
+
+    class D:
+        def __init__(self, *a, **kw):
+            ran.append("draw")
+
+        info = {"renderer": "wgsl"}
+
+        def render(self, state):
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(render_wgsl, "open_adapter", opened)
+    monkeypatch.setattr(render_wgsl, "WGSLRenderer", D)
+    monkeypatch.setattr(adapters, "gpu_devices", lambda: ["/dev/dri/renderD128"])
+    monkeypatch.setattr(adapters, "nvidia_present", lambda: False)
+    monkeypatch.setenv("DIGIARENA_CACHE_DIR", str(tmp_path / "cache"))
+    return ran
+
+
+def _connect_d(stub, **options):
+    DPlatform(stub)
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        env = wec.connect(
+            "secret",
+            url=stub.url,
+            images=True,
+            access_provider=lambda: "scoped",
+            render_options=options or None,
+        )
+    return env, [str(w.message) for w in log if issubclass(w.category, RuntimeWarning)]
+
+
+def test_where_vulkan_misses_the_gpu_chrome_on_the_gpu_draws(
+    stub, vulkan_misses_the_gpu, monkeypatch
+):
+    """A machine whose GPU has no Vulkan driver (no mesa-vulkan-drivers, a
+    virtual GPU): D would draw on the CPU at about a step per second, while
+    Chrome reaches the GPU through OpenGL. Measured with Vulkan hidden on the
+    RTX 4090 machine: D on SwiftShader 0.9 steps/s, Chrome on the GPU's GL 15."""
+    monkeypatch.setattr(render_module, "LocalRenderer", ChromeOnTheGPU)
+    env, texts = _connect_d(stub)
+    try:
+        assert isinstance(env.renderer, ChromeOnTheGPU)
+        assert env.renderer.options["allow_software"] is False, "only Chrome on the GPU"
+        assert vulkan_misses_the_gpu == ["search"], "D is not opened"
+        assert any(
+            "Vulkan reaches no GPU" in t and "OpenGL" in t and "mesa-vulkan-drivers" in t
+            for t in texts
+        ), texts
+        _, info = env.reset(seed=0)
+        assert "Vulkan reaches no GPU" in info["render"]["reason"]
+    finally:
+        env.close()
+
+
+def test_where_chrome_draws_in_software_too_d_draws_and_this_is_kept(
+    stub, vulkan_misses_the_gpu, monkeypatch
+):
+    monkeypatch.setattr(render_module, "LocalRenderer", ChromeInSoftware)
+    env, _ = _connect_d(stub)
+    env.close()
+    assert vulkan_misses_the_gpu == ["search", "open", "draw"] and len(FakeChrome.instances) == 1
+    env, _ = _connect_d(stub)  # the next session does not start Chrome to find out
+    env.close()
+    assert len(FakeChrome.instances) == 1 and vulkan_misses_the_gpu[-1] == "draw"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"renderer": "wgsl"}, {"adapter": "software"}, {"adapter": "name:SwiftShader"}],
+)
+def test_asking_for_d_or_for_a_software_adapter_keeps_d(
+    stub, vulkan_misses_the_gpu, monkeypatch, options
+):
+    monkeypatch.setattr(render_module, "LocalRenderer", ChromeOnTheGPU)
+    env, _ = _connect_d(stub, **options)
+    env.close()
+    assert FakeChrome.instances == [] and vulkan_misses_the_gpu == ["search", "open", "draw"]
+
+
+def test_a_machine_that_shows_no_gpu_does_not_try_chrome(stub, vulkan_misses_the_gpu, monkeypatch):
+    from world_engine_client.wgsl import adapters
+
+    monkeypatch.setattr(adapters, "gpu_devices", lambda: [])
+    monkeypatch.setattr(render_module, "LocalRenderer", ChromeOnTheGPU)
+    env, _ = _connect_d(stub)
+    env.close()
+    assert FakeChrome.instances == [] and vulkan_misses_the_gpu == ["search", "open", "draw"]
+
+
+def test_a_gpu_adapter_does_not_try_chrome(stub, vulkan_misses_the_gpu, monkeypatch):
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: GPU)
+    monkeypatch.setattr(render_module, "LocalRenderer", ChromeOnTheGPU)
+    env, _ = _connect_d(stub)
+    env.close()
+    assert FakeChrome.instances == [] and vulkan_misses_the_gpu == ["open", "draw"]

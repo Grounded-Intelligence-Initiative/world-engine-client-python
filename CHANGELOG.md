@@ -11,17 +11,41 @@
   cameras) renders in about 7 ms, against 60–140 ms on the browser path. The
   shaders ship in the package (`world_engine_client.wgsl`); a server never
   sends shader code.
+- Meshes are drawn flat for now: renderer D's pipeline `wgsl/1` gives object
+  and robot-link meshes one colour per material under one fixed light, with
+  no PBR, environment lighting or shadows (those come in a later pipeline
+  version). Mesh pixels therefore differ from the browser path's: on the
+  room scene of design doc 16 by 33/255 on average where a mesh is in front,
+  against 1.7/255 in the splat region. To keep the browser path's images,
+  pass `render_options={"renderer": "chrome"}`.
 - Connect offers `render_protocols: [1, 2]` and `pipelines: ["wgsl/1"]`. A
   server from before renderer D ignores them and answers protocol 1: the
   browser path, as before. So does a newer server for a scene the pipeline
-  cannot draw.
+  cannot draw (an HDRI, a SuperSplat compressed PLY, a mesh that is not a
+  GLB); it says why (`protocol_reason`), and the client passes that on in a
+  `RuntimeWarning` and in `info["render"]["reason"]`.
 - No GPU is no error. The client looks for a GPU first and then for a
   software adapter: on Linux the system's Vulkan, the bundled loader with the
   system's drivers, Mesa's lavapipe, the bundled SwiftShader; on Windows WARP.
   A software adapter renders with one `RuntimeWarning`, and rendering slower
   than real time (29.4 steps/s) after a warm-up with another, which names the
   adapter, its type and the rate. When nothing renders, the browser path is
-  tried, and then connect raises `RendererError` with the fixes.
+  tried, and then connect raises `RendererError` with the fixes. Each step
+  of the search is probed in a subprocess that imports wgpu from where this
+  process does, so a `pip install --user` or a `PYTHONPATH` install works.
+- On a Linux machine that shows a GPU (a `/dev/dri` render node, NVIDIA's
+  device) that Vulkan does not reach, for instance a GPU without its Vulkan
+  driver (`mesa-vulkan-drivers`), renderer D would draw on the CPU. Headless
+  Chrome then often reaches the GPU through OpenGL and is much faster (with
+  Vulkan hidden on an RTX 4090 machine: about 15 steps/s against 0.9), so the
+  client starts Chrome with hardware WebGL only and, when that works, draws
+  with it, with one `RuntimeWarning` that says how to install the Vulkan
+  driver. When Chrome renders in software too, renderer D draws, and that is
+  remembered for a day. `render_options={"renderer": "wgsl"}` or an
+  `adapter` of `"software"` or `"name:..."` keeps renderer D.
+- A scene renderer D cannot draw (a PLY or GLB it does not read, more splats
+  than the GPU holds) is drawn by the browser path, with a `RuntimeWarning`,
+  where Playwright is installed; `renderer="wgsl"` raises instead.
 - The `render` extra now brings `wgpu==0.32.0` and, on Linux x86_64 and
   aarch64, `world-engine-swiftshader` (a software Vulkan: SwiftShader and the
   Khronos loader, 2 MB on x86_64, about 8 MB on aarch64). Renderer D adds

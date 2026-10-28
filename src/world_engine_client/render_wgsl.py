@@ -18,7 +18,9 @@ adapter renders with one RuntimeWarning; rendering below real time (1/0.034 s,
 about 29.4 steps/s, timed after a warm-up) gets one RuntimeWarning too. When
 nothing renders, :class:`NoRenderAdapter` says how to fix that, and
 :func:`world_engine_client.connect` falls back to the headless Chrome path
-(``render.LocalRenderer``) where it is installed.
+(``render.LocalRenderer``) where it is installed; so it does for a scene D
+cannot draw (:class:`SceneNotDrawable`), and on a machine whose GPU Vulkan
+does not reach but Chrome reaches through OpenGL (see :func:`chrome_may_be_faster`).
 
 Needs the ``render`` extra (wgpu, cryptography for the platform's encrypted
 assets, Pillow for mesh textures): ``pip install 'world-engine-client[render]'``.
@@ -48,6 +50,12 @@ class NoRenderAdapter(RendererError):
     """No GPU and no software adapter renders here (``code`` renderer_unavailable,
     or software_renderer when ``allow_software=False`` left out a software one
     that might have)."""
+
+
+class SceneNotDrawable(RendererError):
+    """Renderer D cannot draw this scene: an asset it does not read (``code``
+    asset_mismatch: a PLY or GLB it does not take), or more than the device's
+    memory holds (renderer_unavailable). The browser path may still draw it."""
 
 
 def available() -> bool:
@@ -87,40 +95,157 @@ def _mode_of(bundle: dict | None) -> str:
     return mode
 
 
-def open_adapter(
-    *, adapter: str = "auto", allow_software: bool = True, cache_dir=None, timeout: float = 120.0
-):
-    """The wgpu adapter D renders with and how it was found:
-    ``(adapter, AdapterChoice)``. Probes once per environment (the result is
-    kept next to the render cache for a day). Emits the software warning.
-    Raises NoRenderAdapter."""
+def _cache_dir(cache_dir) -> Path | None:
+    """The render cache's directory, made as the render cache makes it (this
+    user only); None when there is no usable one (then nothing is kept)."""
     from .cache import _private_dir
-    from .wgsl import adapters
 
     try:
         root = directory(cache_dir)
-        _private_dir(root)  # created as the render cache creates it: this user only
-        cache_file = root / "adapters.json"
+        _private_dir(root)
+        return root
     except Exception:  # noqa: BLE001 - no usable cache directory: probe every time
-        cache_file = None
-    with _lock:  # one search at a time in this process (the instance is shared)
+        return None
+
+
+def _no_adapter(exc, allow_software: bool) -> NoRenderAdapter:
+    code = "renderer_unavailable"
+    fixes = list(exc.fixes)
+    if not allow_software:
+        code = "software_renderer"
+        fixes.insert(0, "leave allow_software at its default (True) to render in software")
+    return NoRenderAdapter(str(exc), code=code, fixes=fixes)
+
+
+def find_adapter(
+    *, adapter: str = "auto", allow_software: bool = True, cache_dir=None, timeout: float = 120.0
+):
+    """The adapter D would render with here, without opening it in this
+    process: the search's ``AdapterChoice`` (each step probed in a subprocess,
+    the result kept next to the render cache for a day). Raises NoRenderAdapter."""
+    from .wgsl import adapters
+
+    root = _cache_dir(cache_dir)
+    with _lock:
         try:
-            found, choice = adapters.open_adapter(
+            return adapters.search(
                 prefer=adapter,
                 allow_software=allow_software,
-                cache_file=cache_file,
+                cache_file=root / "adapters.json" if root else None,
                 timeout=timeout,
             )
         except adapters.NoAdapterError as exc:
-            code = "renderer_unavailable"
-            fixes = list(exc.fixes)
-            if not allow_software:
-                code = "software_renderer"
-                fixes.insert(0, "leave allow_software at its default (True) to render in software")
-            raise NoRenderAdapter(str(exc), code=code, fixes=fixes) from None
+            raise _no_adapter(exc, allow_software) from None
+
+
+def open_adapter(
+    *,
+    adapter: str = "auto",
+    allow_software: bool = True,
+    cache_dir=None,
+    timeout: float = 120.0,
+    choice=None,
+):
+    """The wgpu adapter D renders with and how it was found:
+    ``(adapter, AdapterChoice)``. Probes once per environment (the result is
+    kept next to the render cache for a day), or opens ``choice`` (from
+    :func:`find_adapter`). Emits the software warning. Raises NoRenderAdapter."""
+    from .wgsl import adapters
+
+    root = _cache_dir(cache_dir)
+    with _lock:  # one search at a time in this process (the instance is shared)
+        try:
+            found, choice = adapters.open_adapter(
+                choice=choice,
+                prefer=adapter,
+                allow_software=allow_software,
+                cache_file=root / "adapters.json" if root else None,
+                timeout=timeout,
+            )
+        except adapters.NoAdapterError as exc:
+            raise _no_adapter(exc, allow_software) from None
     if choice.software:
         adapters.warn_once("software", adapters.software_message(choice), stacklevel=4)
     return found, choice
+
+
+# ------------------------------------------- D on the CPU, Chrome on the GPU
+_BROWSER_FILE = "browser.json"
+
+
+def _browser_key(adapter: str, allow_software: bool, chrome_args) -> str:
+    import hashlib
+    import importlib.metadata as md
+
+    from .wgsl import adapters
+
+    try:
+        playwright = md.version("playwright")
+    except Exception:  # noqa: BLE001
+        playwright = None
+    parts = [
+        adapters.environment_key(adapter, allow_software),
+        chrome_args,
+        os.environ.get("WE_RENDER_CHROME_ARGS"),
+        playwright,
+    ]
+    return hashlib.sha256(json.dumps(parts, default=str).encode()).hexdigest()
+
+
+def chrome_may_be_faster(
+    choice, *, adapter: str = "auto", allow_software: bool = True, cache_dir=None, chrome_args=None
+) -> bool:
+    """True when D would draw on the CPU (``choice`` is a software adapter)
+    on a machine that shows a GPU device Vulkan does not reach (no Vulkan
+    driver for the GPU, a virtual GPU, an old one): headless Chrome may reach
+    that GPU through OpenGL, and is then much faster than D on the CPU. Not
+    when the caller asked for a software adapter or one by name, nor when an
+    earlier session here found Chrome on software too (kept a day)."""
+    from .wgsl import adapters
+
+    if not choice.software or adapter not in ("auto", "low-power"):
+        return False
+    if not adapters.gpu_devices():
+        return False
+    root = _cache_dir(cache_dir)
+    if root is None:
+        return True
+    try:
+        rec = json.loads((root / _BROWSER_FILE).read_text())
+        fresh = time.time() - float(rec.get("time", 0)) <= adapters.CACHE_SECONDS
+        known = rec.get("key") == _browser_key(adapter, allow_software, chrome_args) and fresh
+        return not (known and not rec.get("hardware"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return True
+
+
+def remember_browser(
+    *,
+    hardware: bool,
+    gpu: str | None,
+    adapter: str = "auto",
+    allow_software: bool = True,
+    cache_dir=None,
+    chrome_args=None,
+) -> None:
+    """Keep, for this environment, whether headless Chrome reached the GPU."""
+    root = _cache_dir(cache_dir)
+    if root is None:
+        return
+    rec = {
+        "key": _browser_key(adapter, allow_software, chrome_args),
+        "time": time.time(),
+        "hardware": bool(hardware),
+        "gpu": gpu,
+    }
+    try:
+        tmp = root / f"{_BROWSER_FILE}.{os.getpid()}.part"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(rec, f)
+        os.replace(tmp, root / _BROWSER_FILE)
+    except OSError:
+        pass
 
 
 class WGSLRenderer:
@@ -211,9 +336,9 @@ class WGSLRenderer:
                     wgsl_dir=WGSL_DIR,
                 )
             except SplatMemoryError as exc:
-                raise RendererError(str(exc), code="renderer_unavailable") from None
+                raise SceneNotDrawable(str(exc), code="renderer_unavailable") from None
             except ValueError as exc:  # a PLY or GLB this renderer cannot read
-                raise RendererError(
+                raise SceneNotDrawable(
                     f"the scene's assets cannot be drawn: {exc}", code="asset_mismatch"
                 ) from None
             self.load_seconds = time.perf_counter() - started

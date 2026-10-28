@@ -161,6 +161,9 @@ class RemoteEnv:
         self._render_request = "server"
         self._render_options: dict = {}
         self._render_split: tuple[dict, dict, str] = ({}, {}, "auto")
+        # Why this session's images come from the renderer they come from,
+        # when that is not the obvious one (info["render"]["reason"]).
+        self._render_reason: str | None = None
         self.renderer = None  # LocalRenderer when images are rendered on this machine
         # False: step() returns a staged reward in points (see connect).
         self.normalize_reward = True
@@ -405,21 +408,42 @@ class RemoteEnv:
                     f"{render_wgsl.PIPELINE}",
                     fixes=["pip install -U 'world-engine-client[render]'"],
                 )
+            # A newer engine says why it chose the browser path for a client
+            # that offered renderer D (a scene the pipeline cannot draw).
+            declined = bundle.get("protocol_reason") if protocol == 1 and d_ok else None
             if protocol == 1 and not chrome_ok:
                 why = (
                     "render_options asks for renderer 'wgsl'"
                     if self._render_split[2] == "wgsl"
                     else "the browser path needs Playwright and websockets"
                 )
+                if declined:
+                    head = f"this server draws this scene on the browser path only ({declined})"
+                    fixes = []
+                else:
+                    head = (
+                        "this server offers only the browser path (render protocol 1): an "
+                        "engine from before renderer D, or a scene pipeline "
+                        f"{render_wgsl.PIPELINE} cannot draw"
+                    )
+                    fixes = ["upgrade the server to an engine with renderer D"]
                 raise local_render.RendererError(
-                    "this server offers only the browser path (render protocol 1, an engine "
-                    f"from before renderer D), and {why}",
+                    f"{head}, and {why}",
                     code="renderer_unavailable",
-                    fixes=[
-                        "upgrade the server to an engine with renderer D",
-                        "or pip install playwright websockets (the browser path)",
+                    fixes=fixes
+                    + [
+                        "pip install playwright websockets (the browser path)",
                         "or pass images=False for a state-only session",
                     ],
+                )
+            self._render_reason = None
+            if declined:
+                self._render_reason = f"the server chose the browser path: {declined}"
+                warnings.warn(
+                    f"this server draws this scene on the browser path, headless Chrome, not "
+                    f"with renderer D: {declined}",
+                    RuntimeWarning,
+                    stacklevel=3,
                 )
         if proto == 3:
             # Start before the renderer: its start can take longer than the
@@ -431,13 +455,16 @@ class RemoteEnv:
             self.renderer = self._start_renderer(bundle, chrome_ok)
 
     def _start_renderer(self, bundle: dict, chrome_ok: bool):
-        """Renderer D for protocol 2, the browser path for protocol 1; the
-        browser path also when D finds no adapter that renders and Chrome is
-        there (design doc 16 §9.9 runtime, step 5)."""
+        """Renderer D for protocol 2, the browser path for protocol 1. The
+        browser path also draws a protocol-2 session when D finds no adapter
+        that renders (design doc 16 §9.9 runtime, step 5), when D cannot draw
+        the scene, and when D would draw on the CPU while Chrome reaches the
+        machine's GPU through OpenGL (a GPU without a Vulkan driver)."""
+        from . import render_wgsl
         from .render import LocalRenderer
-        from .render_wgsl import NoRenderAdapter, WGSLRenderer
+        from .render_wgsl import NoRenderAdapter, SceneNotDrawable, WGSLRenderer
 
-        d_opts, chrome_opts, _ = self._render_split
+        d_opts, chrome_opts, wants = self._render_split
         parsed = urllib.parse.urlsplit(self._base)
         common = {
             "bundle": bundle,
@@ -448,15 +475,34 @@ class RemoteEnv:
         args = (self._open_render, bundle["scene_init"], bundle["digests"])
         d_failure = None
         if bundle.get("protocol") == 2:
+            search = {
+                "adapter": d_opts.get("adapter", "auto"),
+                "allow_software": d_opts.get("allow_software", True),
+                "cache_dir": d_opts.get("cache_dir"),
+            }
+            timeout = min(float(d_opts.get("timeout", 300.0)), 120.0)
             try:
-                return WGSLRenderer(*args, **common, **d_opts)
-            except NoRenderAdapter as exc:
+                choice = render_wgsl.find_adapter(timeout=timeout, **search)
+                if (
+                    chrome_ok
+                    and wants == "auto"
+                    and render_wgsl.chrome_may_be_faster(
+                        choice, chrome_args=chrome_opts.get("chrome_args"), **search
+                    )
+                ):
+                    chrome = self._chrome_on_the_gpu(args, common, chrome_opts, choice, search)
+                    if chrome is not None:
+                        return chrome
+                opened = render_wgsl.open_adapter(choice=choice, timeout=timeout, **search)
+                return WGSLRenderer(*args, **common, **d_opts, opened=opened)
+            except (NoRenderAdapter, SceneNotDrawable) as exc:
                 if not chrome_ok:
                     raise
                 d_failure = exc
+                self._render_reason = f"renderer D cannot draw here: {exc.reason}"
                 warnings.warn(
-                    "renderer D found no GPU or software adapter that renders here, so camera "
-                    f"images come from headless Chrome instead, which is slower ({exc.reason})",
+                    f"renderer D cannot draw camera images here ({exc.reason}), so they come "
+                    "from headless Chrome instead",
                     RuntimeWarning,
                     stacklevel=4,
                 )
@@ -473,6 +519,48 @@ class RemoteEnv:
                 code="renderer_unavailable",
                 fixes=fixes,
             ) from exc
+
+    def _chrome_on_the_gpu(self, args, common, chrome_opts, choice, search):
+        """The browser path with hardware WebGL only, when D would draw on the
+        CPU: returned when Chrome reaches the GPU, else None (and that is kept
+        for this environment, so the next session does not start Chrome to
+        find out again)."""
+        from . import render_wgsl
+        from .render import LocalRenderer
+        from .wgsl import adapters
+
+        chrome_args = chrome_opts.get("chrome_args")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                chrome = LocalRenderer(*args, **common, **{**chrome_opts, "allow_software": False})
+        except RendererError as exc:
+            render_wgsl.remember_browser(
+                hardware=False, gpu=exc.code, chrome_args=chrome_args, **search
+            )
+            return None
+        render_wgsl.remember_browser(
+            hardware=True, gpu=chrome.gpu, chrome_args=chrome_args, **search
+        )
+        devices = ", ".join(adapters.gpu_devices()[:3])
+        fix = (
+            adapters.nvidia_hint()
+            if adapters.nvidia_present()
+            else "install the GPU's Vulkan driver (apt install mesa-vulkan-drivers for Intel and "
+            "AMD GPUs)"
+        )
+        self._render_reason = (
+            f"Vulkan reaches no GPU here ({devices}), and headless Chrome does through OpenGL"
+        )
+        warnings.warn(
+            f"Vulkan reaches no GPU here, though this machine shows {devices}: renderer D would "
+            f"draw camera images on the CPU ({choice.label}), so headless Chrome draws them on "
+            f"the GPU through OpenGL ({chrome.gpu}), which is faster. For renderer D on the GPU, "
+            f"{fix}",
+            RuntimeWarning,
+            stacklevel=5,
+        )
+        return chrome
 
     def _heartbeat(self):
         while not self._stop.wait(_HEARTBEAT_SECONDS):
@@ -578,6 +666,8 @@ class RemoteEnv:
             render_info = getattr(self.renderer, "info", None)
             if isinstance(render_info, dict):
                 reply["info"]["render"] = dict(render_info)
+                if self._render_reason:
+                    reply["info"]["render"].setdefault("reason", self._render_reason)
         timings["total_ms"] = (time.perf_counter() - started) * 1000
         self.last_timings = timings
         return reply
