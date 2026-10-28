@@ -6,3 +6,6 @@ build/
 .venv/
 .pytest_cache/
 .ruff_cache/
+# The engine's capture page build for bench/igpu (bench/igpu/page.py): not committed.
+bench/igpu/capture_page/index.html
+bench/igpu/capture_page/assets/

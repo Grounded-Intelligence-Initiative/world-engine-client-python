@@ -505,6 +505,8 @@ def test_a_scene_d_cannot_read_is_drawn_by_the_browser_path(stub, chrome, monkey
     warning that says why, instead of connect failing on asset_mismatch."""
     import d_scene
 
+    from world_engine_client.wgsl import adapters
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
@@ -516,6 +518,10 @@ def test_a_scene_d_cannot_read_is_drawn_by_the_browser_path(stub, chrome, monkey
     # renderer D starts here whatever the adapter (on a CPU adapter the client
     # would first try Chrome on the GPU: tested below)
     monkeypatch.setattr(render_wgsl, "chrome_may_be_faster", lambda *a, **k: False)
+    # On a CPU adapter of a machine that shows a GPU (lavapipe here, by
+    # VK_ICD_FILENAMES), the client would try Chrome on that GPU before D
+    # sees the scene: that case has tests of its own below.
+    monkeypatch.setattr(adapters, "gpu_devices", lambda: [])
     monkeypatch.setitem(d_scene.ASSETS, "/__asset/0.ply", compressed_ply())
     platform = DPlatform(stub, encrypted=False)
     with warnings.catch_warnings(record=True) as log:

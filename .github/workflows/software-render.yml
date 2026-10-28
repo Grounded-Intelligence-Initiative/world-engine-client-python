@@ -1,16 +1,29 @@
-# Renderer D where test.yml does not reach: Windows without a GPU (WARP) and
-# Linux on arm64 (lavapipe and the bundled SwiftShader). GitHub's runners have no
-# GPU, so every job here renders in software.
+# Renderer D and the browser path's headless shell where test.yml does not
+# reach: Windows without a GPU (WARP), Linux on arm64 (lavapipe and the bundled
+# SwiftShader) and macOS (Metal). GitHub's Windows and Linux runners have no
+# GPU, so those jobs render in software; the macOS runners are VMs with a
+# paravirtual Metal GPU.
 #
 #   windows: wgpu with force_fallback_adapter gets WARP, the "Microsoft Basic
 #            Render Driver" (D3D12). The adapter probe renders a frame with it,
 #            then the client's own tests draw the D scene through connect(). A
 #            last step repeats the probe with NuGet's WARP 1.0.20 next to
 #            python.exe (what gfx-rs/wgpu's CI uses), to tell an old system WARP
-#            from a real failure.
+#            from a real failure. Then the headless shell downloads into the
+#            client's own directory and the bench (bench/igpu) runs renderer D
+#            once: the paths of the integrated-GPU bench's Windows machine.
 #   linux arm64: world-engine-swiftshader built natively for aarch64 (LLVM 10
 #            backend; cached by its sources), then the client's tests on Mesa's
-#            lavapipe and on the bundled SwiftShader alone.
+#            lavapipe and on the bundled SwiftShader alone, and the arm64
+#            headless shell.
+#   macos:   the same for the bench's macOS machine: the shell, the real-Chrome
+#            tests, renderer D on Metal and one run of the bench. Not yet run
+#            on GitHub, so it may fail without failing the workflow; make it
+#            required once it has passed.
+#
+# The bench's browser-path runs need the engine's capture page, which is not
+# in this repository (bench/igpu/page.py), so CI runs its renderer D path only;
+# tests/test_render_chrome.py runs the shell with a page of its own.
 name: software-render
 
 on:
@@ -54,6 +67,30 @@ jobs:
         env:
           WE_TEST_REQUIRE_WGSL: "1"
           WE_TEST_EXPECT_ADAPTER: warp
+      - name: the browser path's headless shell, in the client's own directory
+        shell: bash
+        run: |
+          python -m world_engine_client.render install
+          python -m world_engine_client.render where | tee where.json
+          python -c "import json, sys; sys.exit(0 if json.load(open('where.json'))['shell'] else 1)"
+          python -m pytest tests/test_render_browser.py
+        env:
+          DIGIARENA_BROWSERS_DIR: ${{ runner.temp }}/browsers
+      - name: the real-Chrome tests on that shell (not yet run on Windows; informational)
+        continue-on-error: true
+        run: python -m pytest tests/test_render_chrome.py
+        env:
+          DIGIARENA_BROWSERS_DIR: ${{ runner.temp }}/browsers
+          WE_TEST_BROWSER: shell
+          WE_TEST_REQUIRE_CHROME: "1"
+      - name: the integrated-GPU bench's tests, and one run of renderer D in it
+        shell: bash
+        run: |
+          python -m pytest tests/test_bench_igpu.py
+          python bench/igpu/run.py --paths d --rounds 1 --steps 5 --min-steps 3 --max-seconds 10 --warmup-seconds 0 --no-images --out bench-ci.json
+          python -c "import json, sys; s = json.load(open('bench-ci.json'))['summary']; print(json.dumps({k: s[k] for k in ('paths', 'failed_runs', 'client_matches_checkout')}, indent=1)); sys.exit(1 if s['failed_runs'] or s['client_matches_checkout'] is False else 0)"
+        env:
+          WE_TEST_REQUIRE_WGSL: "1"
       - name: the probe with NuGet WARP 1.0.20 next to python.exe (informational)
         if: always() && runner.arch == 'X64'
         continue-on-error: true
@@ -70,7 +107,9 @@ jobs:
         if: always()
         with:
           name: software-render-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: "warp*.json"
+          path: |
+            warp*.json
+            bench-ci.json
 
   linux-arm64:
     runs-on: ubuntu-24.04-arm
@@ -103,7 +142,51 @@ jobs:
         env:
           WE_TEST_REQUIRE_WGSL: "1"
           WE_TEST_EXPECT_ADAPTER: swiftshader
+      - name: the browser path's headless shell for linux arm64
+        run: |
+          python -m world_engine_client.render install
+          python -m world_engine_client.render where | tee where.json
+          python -c "import json, sys; sys.exit(0 if json.load(open('where.json'))['shell'] else 1)"
+          python -m pytest tests/test_render_browser.py
+        env:
+          DIGIARENA_BROWSERS_DIR: ${{ runner.temp }}/browsers
       - uses: actions/upload-artifact@v4
         with:
           name: swiftshader-aarch64-ci
           path: dist/*.whl
+
+  macos:
+    runs-on: macos-14
+    continue-on-error: true  # not yet run on GitHub: see the top of this file
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[render,gym]" pytest
+      - name: the browser path's headless shell, in the client's own directory
+        run: |
+          python -m world_engine_client.render install
+          python -m world_engine_client.render where | tee where.json
+          python -c "import json, sys; sys.exit(0 if json.load(open('where.json'))['shell'] else 1)"
+          python -m pytest tests/test_render_browser.py
+        env:
+          DIGIARENA_BROWSERS_DIR: ${{ runner.temp }}/browsers
+      - name: the real-Chrome tests on that shell
+        run: python -m pytest tests/test_render_chrome.py
+        env:
+          DIGIARENA_BROWSERS_DIR: ${{ runner.temp }}/browsers
+          WE_TEST_BROWSER: shell
+          WE_TEST_REQUIRE_CHROME: "1"
+      - name: renderer D on Metal, the bench's tests and one run of renderer D in it
+        run: |
+          python -m pytest tests/test_render_wgsl.py tests/test_wgsl_vendored.py tests/test_bench_igpu.py
+          python bench/igpu/run.py --paths d --rounds 1 --steps 5 --min-steps 3 --max-seconds 10 --warmup-seconds 0 --no-images --out bench-ci.json
+          python -c "import json, sys; s = json.load(open('bench-ci.json'))['summary']; print(json.dumps({k: s[k] for k in ('paths', 'failed_runs', 'client_matches_checkout')}, indent=1)); sys.exit(1 if s['failed_runs'] or s['client_matches_checkout'] is False else 0)"
+        env:
+          WE_TEST_REQUIRE_WGSL: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: software-render-macos-14
+          path: bench-ci.json

@@ -159,15 +159,26 @@ assets. A session with a local `world-engine serve` works without it.
 
 ### The browser path
 
-For a server from before renderer D, and as the last fallback, a headless
-Chrome here runs the engine's capture page, the same scene the browser viewer
-shows. An installed Google Chrome is used if there is one. Otherwise the first
-session downloads Playwright's Chromium (about 300 MB, once, with progress in
-the terminal). Set `WE_RENDER_AUTO_INSTALL=0` or pass
-`render_options={"auto_install": False}` to turn that off and run
-`python -m playwright install chromium` yourself. On a minimal Linux system
-Chromium may also need its system libraries:
-`python -m playwright install --with-deps chromium` (needs sudo).
+For a server from before renderer D, for a scene renderer D's pipeline does
+not draw, and as the last fallback, a headless Chrome here runs the engine's
+capture page, the same scene the browser viewer shows. An installed Google
+Chrome is used if there is one. Otherwise the browser path uses Playwright's
+headless shell: Chrome Headless Shell 148, the build of playwright 1.60.0,
+which the `render` extra pins. The client downloads it once (about 120 MB on
+Linux and Windows, 100 MB on macOS; 260 MB on disk on Linux) into a directory
+of its own next to the render cache, `<user cache dir>/digiarena/browsers`
+(`DIGIARENA_BROWSERS_DIR` moves it). Playwright's own browser directory is
+neither used nor changed. The download starts in the background when the
+renderer starts, while the scene downloads, and prints nothing: it is logged
+to the `world_engine_client.render` logger. Set `WE_RENDER_AUTO_INSTALL=0` or
+pass `render_options={"auto_install": False}` to turn it off, and run
+`python -m world_engine_client.render install` to download it yourself
+(`python -m world_engine_client.render where` shows what is there).
+`WE_RENDER_BROWSER=chrome` or `WE_RENDER_BROWSER=shell` uses only that one
+(any other value stops `connect()` with a `RendererError` that says so).
+On a minimal Linux system the shell may also need Chromium's system
+libraries: `python -m playwright install-deps chromium` (needs sudo).
+`info["render"]` names the browser and its version.
 
 The `WE_RENDER_CHROME_ARGS` environment variable overrides Chrome's flags.
 
@@ -254,7 +265,7 @@ machine has a GPU and still renders in software, check `chrome://gpu`.
 
 Starting the renderer may take `timeout` + 30 seconds (330 s by default) to
 launch Chrome and load the scene, over all of Chrome's flag sets together, and
-`timeout` more for a software first frame. Downloading Chromium does not count.
+`timeout` more for a software first frame. Downloading the browser does not count.
 `render_options={"timeout": 600}` gives a slow machine more time.
 
 On the browser path on a hardware adapter, the client times the rendering of
@@ -403,7 +414,16 @@ tests (real client against a real server) live in the server repo:
 `tests/test_remote_*.py` and `tests/test_teleop_channel.py`.
 `tests/test_render_chrome.py` renders a small page in a real headless Chrome on
 SwiftShader. It is skipped without the `render` extra or a browser;
-`WE_TEST_REQUIRE_CHROME=1` makes it fail instead.
+`WE_TEST_REQUIRE_CHROME=1` makes it fail instead. The tests use the headless
+shell in your `<user cache dir>/digiarena/browsers` (or `DIGIARENA_BROWSERS_DIR`)
+and never download one; `WE_TEST_BROWSER=shell` makes them use it rather than
+an installed Google Chrome.
+
+`bench/igpu/` (see its README) times renderer D against the browser path on
+this machine's GPU and compares their images with an RTX 4090's: the bench for
+integrated GPUs, which neither CI nor the development machine has. Its
+browser-path runs need the engine's capture page, which is not in this
+repository (`--capture-page`).
 
 `tests/test_render_wgsl.py` draws a small scene with renderer D through
 `connect()`, on whatever adapter the machine has; it is skipped without one,

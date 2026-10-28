@@ -1,0 +1,8 @@
+{
+  "scene": "r2_400k, splat only",
+  "source": "design work bench/round2/traces/r2_400k (recorded 2026-10-26T01:34:06), cameras of each state kept, meshes and robot links removed",
+  "warmup_states": 21,
+  "timed_states": 200,
+  "cameras": ["third_person", "top_down", "wrist"],
+  "moving_cameras": ["wrist"]
+}
