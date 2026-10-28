@@ -5,9 +5,14 @@ is covered in the server repository (tests/test_remote_*.py).
 """
 
 import json
+import os
+import re
 import socket
+import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -32,7 +37,10 @@ OBS = {"robot0_eef_pos": [0.1, 0.2, 0.3], "object_ids": ["cube"]}
 
 
 class ControlStub:
-    """Records every request; ``responders[path]`` overrides the default reply."""
+    """Records every request; ``responders[path]`` overrides the default reply.
+
+    GET: ``files[path]`` serves bytes (with single byte ranges, like the
+    engine and the platform); ``gets[path](handler)`` answers by itself."""
 
     def __init__(self):
         self.calls = []
@@ -40,6 +48,11 @@ class ControlStub:
         self.step_id = 0
         self.episode = 0
         self.files = {}  # GET path -> bytes (the /render/ prefix)
+        self.gets = {}  # GET path -> callable(handler) that writes the whole response
+
+    def get_calls(self, path):
+        """The headers of every GET of ``path``, in order."""
+        return [headers for p, body, headers in self.calls if p == path and body is None]
 
     def default(self, path, body):
         path = path[path.index("/control/") :]  # tolerate a gateway prefix
@@ -79,8 +92,71 @@ class ControlStub:
         return [c[0] for c in self.calls]
 
 
-@pytest.fixture
-def stub():
+def send_bytes(handler, data: bytes, headers: dict | None = None) -> None:
+    """Answer a GET with ``data``, honouring ``Range: bytes=start-[end]``."""
+    m = re.fullmatch(r"bytes=(\d+)-(\d*)", handler.headers.get("Range") or "")
+    if m:
+        start = int(m.group(1))
+        end = min(int(m.group(2)) if m.group(2) else len(data) - 1, len(data) - 1)
+        if start >= len(data):
+            handler.send_response(416)
+            handler.send_header("Content-Range", f"bytes */{len(data)}")
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
+        handler.send_response(206)
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        data = data[start : end + 1]
+    else:
+        handler.send_response(200)
+    handler.send_header("Content-Type", "application/octet-stream")
+    handler.send_header("Content-Length", str(len(data)))
+    for k, v in (headers or {}).items():
+        handler.send_header(k, v)
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def send_json(handler, status: int, reply: dict) -> None:
+    data = json.dumps(reply).encode()
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+@pytest.fixture(autouse=True)
+def private_cache(tmp_path, monkeypatch):
+    """Every test gets its own render cache and temporary directory: nothing
+    reaches the user's cache directory or /tmp."""
+    root = tmp_path / "user-cache"
+    # Playwright finds its browsers under the user cache directory too: keep
+    # them where they are.
+    if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        xdg = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+        if sys.platform.startswith("linux"):
+            monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(Path(xdg) / "ms-playwright"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(root))
+    if sys.platform.startswith("linux"):
+        monkeypatch.delenv("DIGIARENA_CACHE_DIR", raising=False)
+    else:  # the user cache directory there does not follow XDG_CACHE_HOME
+        monkeypatch.setenv("DIGIARENA_CACHE_DIR", str(root / "digiarena" / "render"))
+    monkeypatch.delenv("DIGIARENA_CACHE_MAX_AGE_DAYS", raising=False)
+    monkeypatch.delenv("DIGIARENA_CACHE_MAX_SIZE_GB", raising=False)
+    systmp = tmp_path / "systmp"
+    systmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(systmp))
+    try:
+        from world_engine_client import cache
+    except ImportError:  # world-engine-client before 0.6 has no render cache
+        return root
+    monkeypatch.setattr(cache, "_warned", set())
+    return root
+
+
+def start_stub() -> ControlStub:
+    """A ControlStub on a loopback port; ``state.close()`` stops it."""
     state = ControlStub()
 
     class Handler(BaseHTTPRequestHandler):
@@ -108,17 +184,17 @@ def stub():
 
         def do_GET(self):
             state.calls.append((self.path, None, dict(self.headers)))
+            custom = state.gets.get(self.path)
+            if custom is not None:
+                custom(self)
+                return
             data = state.files.get(self.path)
             if data is None:
                 self.send_response(404)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            send_bytes(self, data)
 
         def log_message(self, *args):
             pass
@@ -127,6 +203,17 @@ def stub():
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     state.url = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def close():
+        server.shutdown()
+        server.server_close()
+
+    state.close = close
+    return state
+
+
+@pytest.fixture
+def stub():
+    state = start_stub()
     yield state
-    server.shutdown()
-    server.server_close()
+    state.close()

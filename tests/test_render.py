@@ -88,8 +88,15 @@ def test_images_are_rendered_locally(client_render):
     env = wec.connect("secret", url=client_render.url, images=True, render_options={"x": 1})
     connect = client_render.calls[0][1]
     assert connect["render"] == "client" and connect["images"] is True
+    assert connect["asset_encryption"] == ["dac1"], "this client reads encrypted assets"
     fake = FakeRenderer.instances[0]
-    assert fake.scene_init == BUNDLE["scene_init"] and fake.options == {"x": 1}
+    assert fake.scene_init == BUNDLE["scene_init"] and fake.options.pop("x") == 1
+    assert fake.options == {
+        "bundle": BUNDLE,
+        "platform": False,
+        "origin": client_render.url,
+        "scene_id": None,
+    }
     obs, _ = env.reset(seed=0)
     assert obs["rgb"]["front"].shape == (6, 8, 3) and fake.states == [STATE]
     assert env.render() is obs["rgb"]["front"]
@@ -244,18 +251,33 @@ def test_asset_requests_carry_the_session_credentials(client_render):
 
 
 def test_downloads_are_verified_against_their_digest(tmp_path, stub):
-    renderer = object.__new__(render_module.LocalRenderer)  # no browser needed
+    from world_engine_client.cache import SceneAssets
+
     env = wec.connect("secret", url=stub.url)
-    renderer._fetch = env._open_render
     data = b"splat bytes"
     stub.files["/render/__asset/0.ply"] = data
-    good = tmp_path / hashlib.sha256(data).hexdigest()
-    renderer._download("/__asset/0.ply", good.name, good)
-    assert good.read_bytes() == data
-    bad = tmp_path / ("0" * 64)
+    good = SceneAssets(
+        env._open_render,
+        {"/__asset/0.ply": hashlib.sha256(data).hexdigest()},
+        encrypted=False,
+        platform=False,
+        cache_dir=tmp_path / "c",
+    )
+    good.prepare()
+    assert good.read("/__asset/0.ply") == data
+    bad = SceneAssets(
+        env._open_render,
+        {"/__asset/0.ply": "0" * 64},
+        encrypted=False,
+        platform=False,
+        cache_dir=tmp_path / "c",
+    )
     with pytest.raises(wec.RendererError, match="digest"):
-        renderer._download("/__asset/0.ply", bad.name, bad)
-    assert not bad.exists() and not bad.with_suffix(".part").exists()
+        bad.prepare()
+    assert [p.name for p in (tmp_path / "c" / "blobs").rglob("*") if p.is_file()] == [
+        hashlib.sha256(data).hexdigest()
+    ]
+    assert list((tmp_path / "c" / "tmp").iterdir()) == []
     env.close()
 
 
@@ -436,7 +458,8 @@ class FakeBrowser:
         software_flags = "--use-angle=swiftshader" in args
         self.gpu = sim.gpu if sim.gpu and not software_flags else SWIFTSHADER_GPU
 
-    async def new_page(self):
+    async def new_page(self, **options):
+        self.options = options  # extra_http_headers: the session token
         return FakePage(self)
 
     async def close(self):

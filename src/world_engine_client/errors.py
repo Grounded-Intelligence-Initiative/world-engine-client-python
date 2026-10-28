@@ -55,6 +55,30 @@ class RecordingPendingError(WorldEngineClientError):
     """Save or discard recording data in the editor before resetting."""
 
 
+class RendererError(WorldEngineClientError):
+    """Local rendering is unavailable or failed. The physics step itself is
+    unaffected: ``env.observe()`` renders the current state again."""
+
+
+class RenderFetchError(OSError):
+    """The server answered a ``/render/`` request with an error: ``status``
+    is the HTTP status; ``code``, ``message`` and ``fixes`` come from its
+    ``{ok: false, code, error, fixes}`` reply when it sent one."""
+
+    def __init__(
+        self,
+        status: int,
+        path: str,
+        *,
+        code: str | None = None,
+        message: str = "",
+        fixes: list[str] | None = None,
+    ):
+        super().__init__(f"HTTP {status} for {path}: {message}")
+        self.status, self.path = status, path
+        self.code, self.message, self.fixes = code, message, list(fixes or [])
+
+
 _BY_CODE = {
     "recovery_required": RecoveryRequiredError,
     "recording_pending": RecordingPendingError,

@@ -26,7 +26,13 @@ import urllib.parse
 
 import numpy as np
 
-from .errors import ProtocolError, RecoveryRequiredError, WorldEngineClientError, raise_for
+from .errors import (
+    ProtocolError,
+    RecoveryRequiredError,
+    RenderFetchError,
+    WorldEngineClientError,
+    raise_for,
+)
 
 MAX_RESPONSE = 64 * 1024 * 1024
 
@@ -67,8 +73,10 @@ def connect(
     with a RuntimeWarning. ``render`` accepts ``"auto"`` or ``"local"`` (the
     same thing; kept for callers that pass it). ``render_options`` go to
     :class:`world_engine_client.render.LocalRenderer` (``cache_dir``,
-    ``allow_software`` (default True; False refuses software rendering),
-    ``chrome_args``, ``auto_install``, ``timeout``)."""
+    ``scene_name``, ``allow_software`` (default True; False refuses software
+    rendering), ``chrome_args``, ``auto_install``, ``timeout``). Scene assets
+    are kept in the render cache (:mod:`world_engine_client.cache`): the
+    hosting platform's arrive encrypted and stay encrypted on disk."""
     if render not in ("auto", "local"):
         raise ValueError("render must be 'auto' or 'local': servers no longer render camera images")
     env = RemoteEnv(url.rstrip("/"), token, timeout=timeout)
@@ -283,6 +291,9 @@ class RemoteEnv:
             body["obs_keys"] = list(obs_keys)
         if local:
             body["render"] = "client"
+            # This client reads the platform's encrypted scene assets (DAC1);
+            # a hosted engine refuses image sessions of clients that do not.
+            body["asset_encryption"] = ["dac1"]
         reply = self._post("/control/connect", body, with_session=False)
         if reply.get("proto") != proto:
             raise ProtocolError("server did not honor the requested protocol")
@@ -306,8 +317,16 @@ class RemoteEnv:
         if local:
             from .render import LocalRenderer
 
+            parsed = urllib.parse.urlsplit(self._base)
             self.renderer = LocalRenderer(
-                self._open_render, bundle["scene_init"], bundle["digests"], **self._render_options
+                self._open_render,
+                bundle["scene_init"],
+                bundle["digests"],
+                bundle=bundle,
+                platform=self._access_provider is not None,
+                origin=f"{parsed.scheme}://{parsed.netloc}",
+                scene_id=self.metadata.get("scene_id"),
+                **self._render_options,
             )
 
     def _heartbeat(self):
@@ -412,26 +431,47 @@ class RemoteEnv:
         self.last_timings = timings
         return reply
 
-    def _open_render(self, path: str):
+    def _open_render(self, path: str, headers: dict | None = None):
         """GET <server>/render<path> with this session's credentials, on its own
-        connection (the renderer runs on another thread)."""
+        connection (the renderer runs on another thread). ``headers`` adds
+        request headers, a ``Range`` to resume a download. 404 raises
+        FileNotFoundError, any other error status RenderFetchError with the
+        server's code and message. Waits at most 60 s for each piece of data."""
         parsed = urllib.parse.urlsplit(self._base)
         transport = (
             http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         )
-        conn = transport(parsed.hostname, parsed.port, timeout=max(self._timeout, 120))
-        headers = {"X-We-Control-Token": self._token}
+        conn = transport(parsed.hostname, parsed.port, timeout=max(self._timeout, 60))
+        sent = {"X-We-Control-Token": self._token}
         if self._access_provider:
-            headers["Authorization"] = "Bearer " + self._access_provider()
-        conn.request("GET", self._prefix + "/render" + path, headers=headers)
-        response = conn.getresponse()
+            sent["Authorization"] = "Bearer " + self._access_provider()
+        sent.update(headers or {})
+        try:
+            conn.request("GET", self._prefix + "/render" + path, headers=sent)
+            response = conn.getresponse()
+        except BaseException:
+            conn.close()
+            raise
         if response.status == 404:
             conn.close()
             raise FileNotFoundError(path)
-        if response.status != 200:
-            detail = response.read(500).decode("utf-8", "replace")
+        if response.status not in (200, 206):
+            detail = response.read(4096)
             conn.close()
-            raise OSError(f"HTTP {response.status} for {path}: {detail}")
+            try:
+                reply = json.loads(detail)
+            except ValueError:
+                reply = None
+            if not isinstance(reply, dict):
+                reply = {"error": detail[:500].decode("utf-8", "replace")}
+            fixes = reply.get("fixes")
+            raise RenderFetchError(
+                response.status,
+                path,
+                code=reply.get("code") if isinstance(reply.get("code"), str) else None,
+                message=str(reply.get("error") or ""),
+                fixes=fixes if isinstance(fixes, list) else None,
+            )
         return _Owned(response, conn)
 
     @staticmethod
@@ -454,9 +494,13 @@ class _Owned:
 
     def __init__(self, response, conn):
         self._response, self._conn = response, conn
+        self.status = response.status
 
     def read(self, *a):
         return self._response.read(*a)
+
+    def getheader(self, name, default=None):
+        return self._response.getheader(name, default)
 
     def __enter__(self):
         return self

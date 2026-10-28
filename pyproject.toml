@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "world-engine-client"
-version = "0.5.0"
+version = "0.6.0"
 description = "Remote Gym-style Python client for a World Engine simulation server: connect(token) -> reset/step over HTTP."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,11 +28,12 @@ dependencies = [
 img = ["Pillow>=10"]
 gym = ["gymnasium>=1.0"]
 # Camera images, rendered on this machine in headless Chrome. Without an
-# installed Chrome, Playwright's Chromium downloads on first use.
-render = ["Pillow>=10", "playwright>=1.40", "websockets>=12"]
+# installed Chrome, Playwright's Chromium downloads on first use. The hosting
+# platform sends scene assets encrypted (AES-256-GCM): cryptography reads them.
+render = ["Pillow>=10", "playwright>=1.40", "websockets>=12", "cryptography>=42"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff", "Pillow>=10", "gymnasium>=1.0"]
+dev = ["pytest>=8", "ruff", "Pillow>=10", "gymnasium>=1.0", "cryptography>=42"]
 
 [project.urls]
 Homepage = "https://github.com/Grounded-Intelligence-Initiative/world-engine-client-python"

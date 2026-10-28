@@ -25,12 +25,12 @@ from .errors import (
     ProtocolError,
     RecordingPendingError,
     RecoveryRequiredError,
+    RendererError,
     ResetRequiredError,
     TeleopActiveError,
     TokenError,
     WorldEngineClientError,
 )
-from .render import RendererError
 from .rotations import (
     axisangle_to_matrix,
     matrix_to_axisangle,
@@ -56,4 +56,4 @@ __all__ = [
     "axisangle_to_matrix",
     "matrix_to_axisangle",
 ]
-__version__ = "0.5.0"
+__version__ = "0.6.0"

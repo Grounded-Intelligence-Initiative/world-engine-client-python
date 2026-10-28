@@ -16,7 +16,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e '.[img,gym]' pytest ruff
+      # cryptography: the cache and DAC1 tests run here too, without a browser.
+      - run: pip install -e '.[img,gym]' pytest ruff cryptography
       - run: ruff check .
       - run: python -m pytest
 
