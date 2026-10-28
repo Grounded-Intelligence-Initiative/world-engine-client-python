@@ -231,7 +231,7 @@ def _plaintext_files(*roots):
             try:
                 if p.is_file() and not p.is_symlink():
                     with open(p, "rb") as f:
-                        if f.read(8).startswith(MAGICS):
+                        if f.read(16).startswith(MAGICS):
                             found.append(p)
             except OSError:
                 continue

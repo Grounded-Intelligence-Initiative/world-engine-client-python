@@ -89,16 +89,23 @@ def test_a_server_with_renderer_d_draws_without_a_browser(stub, d):
     assert env.renderer is None
 
 
-def test_a_platform_session_keeps_only_ciphertext_on_disk(stub, d):
-    platform = DPlatform(stub)
+@pytest.mark.parametrize("hdri", [False, True], ids=["bake", "hdri"])
+def test_a_platform_session_keeps_only_ciphertext_on_disk(stub, d, hdri):
+    """The splat, the WEM1 and an HDRI (renderer D reads it, the scan knows
+    its magic bytes) stay as the platform sent them."""
+    import d_scene
+
+    platform = DPlatform(stub, hdri=d_scene.hdr() if hdri else None)
     env = connect(stub)
     try:
-        env.reset(seed=0)
+        _, info = env.reset(seed=0)
+        assert info["render"]["lighting"] == ("hdri" if hdri else "scene"), info["render"]
         env.step([0.0] * env.action_dim)
         root = cache_root()
         assert plaintext_files(root, tempfile.gettempdir()) == []
         blobs = [p.read_bytes() for p in (root / "blobs").rglob("*") if p.is_file()]
-        for url in ("/__asset/0.ply", "/__asset/1.wem1"):
+        urls = ("/__asset/0.ply", "/__asset/1.wem1") + ((d_scene.HDRI,) if hdri else ())
+        for url in urls:
             assert platform.cipher(url) in blobs, f"{url} is stored as the platform sent it"
     finally:
         env.close()

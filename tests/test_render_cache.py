@@ -71,7 +71,7 @@ def plaintext_files(*roots) -> list[Path]:
     found = []
     for p in files_under(*roots):
         with open(p, "rb") as f:
-            if f.read(8).startswith(MAGICS):
+            if f.read(16).startswith(MAGICS):
                 found.append(p)
     return found
 

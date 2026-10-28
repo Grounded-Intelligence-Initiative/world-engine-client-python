@@ -3,9 +3,10 @@ platform stand-in (platform_stub.py): the golden splat PLY, a red box off the
 origin (its GLB, which the browser path draws, and the engine's WEM1 of it,
 which renderer D draws), one robot link (WEL1), two cameras of different sizes.
 
-``DPlatform(stub, encrypted=...)`` answers protocol 2 to a client that offers
-it with pipeline wgsl/1, protocol 1 otherwise (as the engine does), and sends a
-render_state with every observation. ``set_box(pos)`` moves the box."""
+``DPlatform(stub, encrypted=..., hdri=...)`` answers protocol 2 to a client that
+offers it with pipeline wgsl/1, protocol 1 otherwise (as the engine does), and
+sends a render_state with every observation; ``hdri`` (the bytes of an HDRI,
+e.g. ``hdr()``) lights the scene with it. Setting ``box`` moves the box."""
 
 from __future__ import annotations
 
@@ -131,18 +132,37 @@ def link_wel1() -> bytes:
     return b"WEL1" + struct.pack("<IIBBBx", 4, 4, 0, 0, 0) + v.tobytes() + f.tobytes()
 
 
+def hdr() -> bytes:
+    """A 128 x 64 Radiance .hdr of whole RGBE bytes: a sky gradient and a sun
+    (the engine's tests/wgsl_pin.py has the same)."""
+    h, w = 64, 128
+    y, x = np.mgrid[0:h, 0:w]
+    px = np.zeros((h, w, 4), np.uint8)
+    px[..., 0] = 60 + (186 * x) // (w - 1)
+    px[..., 1] = 90 + (120 * (h - 1 - y)) // (h - 1)
+    px[..., 2] = 200
+    px[..., 3] = 128
+    px[12:22, 80:94] = (240, 200, 160, 132)
+    return f"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y {h} +X {w}\n".encode() + px.tobytes()
+
+
 ASSETS = {
     "/__asset/0.ply": (GOLDEN / "scene.ply").read_bytes(),
     "/__asset/1.glb": box_glb(),
     "/__asset/1.wem1": box_wem1(),
 }
 ROBOT = {"/__robot/0.bin": link_wel1()}
+HDRI = "/__asset/hdri.hdr"
 
 
 class DPlatform(Platform):
-    def __init__(self, stub, *, encrypted: bool = True):
-        super().__init__(stub, encrypted=encrypted, assets=dict(ASSETS))
+    def __init__(self, stub, *, encrypted: bool = True, hdri: bytes | None = None):
+        assets = dict(ASSETS)
+        if hdri is not None:
+            assets[HDRI] = hdri
+        super().__init__(stub, encrypted=encrypted, assets=assets)
         self.assets.update(ROBOT)
+        self.hdri = hdri is not None
         self.box = list(BOX_AT)
         self.offers: list[dict] = []
 
@@ -166,7 +186,7 @@ class DPlatform(Platform):
                     "quat": [0, 0, 0, 1],
                 }
             ],
-            "hdri": None,
+            "hdri": {"url": HDRI, "strength": 1.3} if self.hdri else None,
             "probe_center": None,
             "robot": {
                 "ee_proxy_size": [0.04, 0.08, 0.04],

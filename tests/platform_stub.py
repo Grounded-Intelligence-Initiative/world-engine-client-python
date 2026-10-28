@@ -44,7 +44,18 @@ ASSETS = {
     "/__asset/4.jpg": body(b"\xff\xd8\xff\xe0", "jpg", 6_000),
 }
 ROBOT = {"/__robot/0.bin": body(b"WEL1", "link", 5_000)}
-MAGICS = (b"ply", b"glTF", b"WEM1", b"\x89PNG", b"\xff\xd8\xff")
+# what a plain asset starts with, for the scans of what is on disk: splats,
+# GLBs, WEM1 meshes, textures, HDRIs (Radiance .hdr, OpenEXR)
+MAGICS = (
+    b"ply",
+    b"glTF",
+    b"WEM1",
+    b"\x89PNG",
+    b"\xff\xd8\xff",
+    b"#?RADIANCE",
+    b"#?RGBE",
+    b"\x76\x2f\x31\x01",
+)
 
 INDEX = (
     b'<!doctype html><script type="module" crossorigin src="/assets/main-D-j9cs4x.js"></script>'
