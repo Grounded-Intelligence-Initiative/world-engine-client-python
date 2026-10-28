@@ -237,7 +237,6 @@ def chrome(monkeypatch):
     monkeypatch.setattr(render_module, "LocalRenderer", FakeChrome)
     monkeypatch.setattr(render_module, "_available_plain", lambda: True)
     monkeypatch.setattr(render_module, "available", lambda: True)
-    monkeypatch.setattr(render_module, "_available_plain", lambda: True)
     return FakeChrome
 
 
@@ -266,7 +265,6 @@ def no_adapter(**kw):
 
 def test_without_an_adapter_the_browser_path_draws(stub, chrome, monkeypatch):
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "_available_plain", lambda: True)
     monkeypatch.setattr(render_wgsl, "find_adapter", no_adapter)
     DPlatform(stub)
     with warnings.catch_warnings(record=True) as log:
@@ -284,7 +282,6 @@ def test_without_an_adapter_the_browser_path_draws(stub, chrome, monkeypatch):
 
 def test_when_nothing_renders_the_error_names_the_fixes(stub, chrome, monkeypatch):
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "_available_plain", lambda: True)
     monkeypatch.setattr(render_wgsl, "find_adapter", no_adapter)
 
     class NoChrome(FakeChrome):
@@ -318,7 +315,6 @@ def test_when_nothing_renders_the_error_names_the_fixes(stub, chrome, monkeypatc
 
 def test_renderer_wgsl_does_not_fall_back(stub, chrome, monkeypatch):
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "_available_plain", lambda: True)
     monkeypatch.setattr(render_wgsl, "find_adapter", no_adapter)
     platform = DPlatform(stub)
     with pytest.raises(render_wgsl.NoRenderAdapter, match="apt install libvulkan1"):
@@ -355,7 +351,6 @@ def test_an_older_server_without_the_browser_path_installed(stub, monkeypatch):
     """A server from before renderer D answers protocol 1; this machine has no
     Playwright: say so, and how to fix it."""
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "_available_plain", lambda: True)
     monkeypatch.setattr(render_module, "_available_plain", lambda: False)
     platform = DPlatform(stub)
     platform._connect = lambda body, base=platform._connect: _protocol(base(body), 1)
@@ -409,7 +404,6 @@ def test_render_options_go_to_the_renderer_that_uses_them(stub, monkeypatch):
 
     searched = {}
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "_available_plain", lambda: True)
     monkeypatch.setattr(render_wgsl, "WGSLRenderer", D)
     monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: searched.update(kw) or GPU)
     monkeypatch.setattr(render_wgsl, "open_adapter", lambda **kw: (object(), kw["choice"]))
@@ -633,7 +627,6 @@ def test_a_mesh_d_cannot_draw_is_drawn_by_the_browser_path(stub, chrome, monkeyp
 
 def test_a_server_that_declines_d_for_a_scene_says_why(stub, chrome, monkeypatch):
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "_available_plain", lambda: True)
     reason = "pipeline wgsl/1 does not read the scene's splat PLY: element 'chunk' first"
     platform = DPlatform(stub)
     stub.responders["/control/connect"] = lambda body: _declined(platform._connect(body), reason)
@@ -658,7 +651,6 @@ def _declined(reply, reason):
 
 def test_a_client_without_the_browser_path_hears_why_the_server_declined(stub, monkeypatch):
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "_available_plain", lambda: True)
     monkeypatch.setattr(render_module, "_available_plain", lambda: False)
     reason = "the scene has an HDRI, which pipeline wgsl/1 does not draw"
     platform = DPlatform(stub)
@@ -693,7 +685,6 @@ def vulkan_misses_the_gpu(chrome, monkeypatch, tmp_path):
 
     ran = []
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
-    monkeypatch.setattr(render_wgsl, "_available_plain", lambda: True)
     monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: ran.append("search") or SWS)
 
     def opened(**kw):
