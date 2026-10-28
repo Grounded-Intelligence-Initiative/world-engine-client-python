@@ -600,8 +600,8 @@ def test_chrome_is_looked_for_where_playwright_looks():
 
 def test_the_command_line_installs_and_says_where(downloads, capsys):
     assert render_module.main(["where"]) == 0
-    where = capsys.readouterr().out
-    assert str(render_module.browsers_dir()) in where and '"shell": null' in where
+    where = json.loads(capsys.readouterr().out)  # JSON: a Windows path's \ comes out as \\
+    assert where["dir"] == str(render_module.browsers_dir()) and where["shell"] is None
     assert render_module.main(["install"]) == 0
     assert capsys.readouterr().out.strip() == str(render_module.shell_executable())
     assert len(downloads) == 1
