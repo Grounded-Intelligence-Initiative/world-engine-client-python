@@ -223,12 +223,14 @@ def remember_browser(
     *,
     hardware: bool,
     gpu: str | None,
+    error: str | None = None,
     adapter: str = "auto",
     allow_software: bool = True,
     cache_dir=None,
     chrome_args=None,
 ) -> None:
-    """Keep, for this environment, whether headless Chrome reached the GPU."""
+    """Keep, for this environment, whether headless Chrome reached the GPU
+    (its WebGL renderer ``gpu``), or why it did not (``error``)."""
     root = _cache_dir(cache_dir)
     if root is None:
         return
@@ -237,6 +239,7 @@ def remember_browser(
         "time": time.time(),
         "hardware": bool(hardware),
         "gpu": gpu,
+        "error": error,
     }
     try:
         tmp = root / f"{_BROWSER_FILE}.{os.getpid()}.part"

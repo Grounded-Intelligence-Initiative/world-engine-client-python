@@ -77,11 +77,13 @@ COLOR_FORMATS = {"rgba8unorm": 4, "rgb10a2unorm": 4, "rgba16float": 8, "rgba32fl
 
 
 def default_color_format(adapter_type: str | None, features) -> str:
-    """The colour target for an adapter: rgba16float on a GPU (its draw pass
-    costs 1.17 times rgba8unorm's on an RTX 4090; rgb10a2unorm costs 1.45 and
-    rgba32float 6.4); rgba32float on a CPU adapter whose device has
-    float32-blendable (as fast as 8 bits there), else rgb10a2unorm (lavapipe
-    blends rgba16float with a bias of -1.1/255)."""
+    """The colour target for an adapter: rgba16float on a GPU (on an RTX 4090
+    its draw pass costs 1.17 times rgba8unorm's, and a whole frame of the room
+    scene, three 256x256 cameras, 1.04 to 1.07 times: 1.02 to 1.10 over rounds
+    measured in one process and in separate ones, 2026-10-28; rgb10a2unorm's
+    draw pass costs 1.45 and rgba32float's 6.4); rgba32float on a CPU adapter
+    whose device has float32-blendable (as fast as 8 bits there), else
+    rgb10a2unorm (lavapipe blends rgba16float with a bias of -1.1/255)."""
     if adapter_type == "CPU":
         return "rgba32float" if "float32-blendable" in set(features or ()) else "rgb10a2unorm"
     return "rgba16float"

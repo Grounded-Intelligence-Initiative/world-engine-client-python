@@ -585,10 +585,20 @@ def test_where_vulkan_misses_the_gpu_chrome_on_the_gpu_draws(
         env.close()
 
 
+class ChromeThatBreaks(FakeChrome):
+    def __init__(self, fetch, scene_init, digests, **options):
+        FakeChrome.instances.append(self)
+        raise RuntimeError("Target page, context or browser has been closed")
+
+
+@pytest.mark.parametrize("chrome_kind", [ChromeInSoftware, ChromeThatBreaks])
 def test_where_chrome_draws_in_software_too_d_draws_and_this_is_kept(
-    stub, vulkan_misses_the_gpu, monkeypatch
+    stub, vulkan_misses_the_gpu, monkeypatch, chrome_kind
 ):
-    monkeypatch.setattr(render_module, "LocalRenderer", ChromeInSoftware)
+    """Chrome on software, or a Chrome that fails to start in any way: the
+    check costs one start, renderer D draws, and the next session here skips
+    the check."""
+    monkeypatch.setattr(render_module, "LocalRenderer", chrome_kind)
     env, _ = _connect_d(stub)
     env.close()
     assert vulkan_misses_the_gpu == ["search", "open", "draw"] and len(FakeChrome.instances) == 1
