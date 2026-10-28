@@ -29,8 +29,8 @@ const SH_C0: f32 = 0.28209479177387814;
 
 // One camera, image convention: x right, y down, z forward (OpenCV).
 struct Camera {
-  rot0: vec4f,   // rows of the world -> camera rotation (xyz)
-  rot1: vec4f,
+  rot0: vec4f,   // rows of the world -> camera rotation (xyz); rot0.w, rot1.w: Spark's
+  rot1: vec4f,   // pixel scale (renderSize / target size, x and y), 0 when they agree
   rot2: vec4f,
   pos: vec4f,    // camera centre in the world (xyz)
   intr: vec4f,   // fx, fy, cx, cy in pixels
@@ -54,7 +54,7 @@ struct Params {
   rec_chunk: u32,         // records per record chunk
   n_rec_chunks: u32,      // record chunks per camera slot
   tiles_cap: u32,         // ceil(capacity / SORT_TILE): row stride of the sort histogram
-  _pad0: u32,
+  encode_linear: u32,     // 1: splat colours decoded with pow(c, 2.2) (Spark's encodeLinear, the environment bake)
   _pad1: u32,
   sh_rot0: vec4f,         // rows of world -> splat-object rotation, for SH view directions
   sh_rot1: vec4f,
@@ -115,6 +115,16 @@ fn sort_key(dist: f32) -> u32 {
 // min_alpha before and after the compensation. Image space is y-down, so the
 // minor-axis direction is mirrored relative to Spark's NDC; the quad covers
 // the same pixels.
+//
+// Spark measures all of that in the pixels of its renderSize, the canvas's
+// drawing buffer unless the SparkRenderer has a target. The capture page bakes
+// its environment cube (128^2 faces) with the canvas at the window's size, so
+// there the splats are blurred, compensated and capped as if the face were that
+// big. A camera with a pixel scale (rot0.w, rot1.w = renderSize / target size)
+// does the same: the covariance, blur, compensation, cap and minimum radius in
+// Spark's pixels, then the ellipse mapped back to the target's pixels (the
+// rectangle of its principal axes holds the same ellipse, and the fragment
+// falloff only sees the ellipse).
 fn project_splat(cam: Camera, P: Params, mean: vec3f, c0: vec3f, c1: vec3f, opacity: f32) -> Proj {
   var p: Proj;
   p.ok = false;
@@ -128,14 +138,16 @@ fn project_splat(cam: Camera, P: Params, mean: vec3f, c0: vec3f, c1: vec3f, opac
   if (!(t.z > near && t.z < far)) {
     return p;
   }
-  let fx = cam.intr.x;
-  let fy = cam.intr.y;
+  let scaled = cam.rot0.w > 0.0 && cam.rot1.w > 0.0;
+  let ps = select(vec2f(1.0), vec2f(cam.rot0.w, cam.rot1.w), scaled);
   let iz = 1.0 / t.z;
-  let u = fx * t.x * iz + cam.intr.z;
-  let v = fy * t.y * iz + cam.intr.w;
+  let u = cam.intr.x * t.x * iz + cam.intr.z;
+  let v = cam.intr.y * t.y * iz + cam.intr.w;
   if (abs(u - cam.intr.z) > P.clip_xy * 0.5 * cam.view.x || abs(v - cam.intr.w) > P.clip_xy * 0.5 * cam.view.y) {
     return p;
   }
+  let fx = cam.intr.x * ps.x;
+  let fy = cam.intr.y * ps.y;
   // rows of J * W (camera Jacobian times world -> camera rotation)
   let j0 = (fx * iz) * cam.rot0.xyz - (fx * t.x * iz * iz) * cam.rot2.xyz;
   let j1 = (fy * iz) * cam.rot1.xyz - (fy * t.y * iz * iz) * cam.rot2.xyz;
@@ -175,6 +187,28 @@ fn project_splat(cam: Camera, P: Params, mean: vec3f, c0: vec3f, c1: vec3f, opac
   p.center = vec2f(u, v);
   p.axis1 = ev1 * scale1;
   p.scale2 = scale2;
+  if (scaled) {
+    // the quad's axes in Spark's pixels, back to the target's: A = S^-1 [ev1 s1, ev2 s2];
+    // the principal axes of A A^T span the same ellipse
+    let ev2 = vec2f(ev1.y, -ev1.x);
+    let c0 = vec2f(ev1.x * scale1, ev1.y * scale1) / ps;
+    let c1 = vec2f(ev2.x * scale2, ev2.y * scale2) / ps;
+    let m00 = c0.x * c0.x + c1.x * c1.x;
+    let m01 = c0.x * c0.y + c1.x * c1.y;
+    let m11 = c0.y * c0.y + c1.y * c1.y;
+    let mm = 0.5 * (m00 + m11);
+    let md = sqrt(max(0.0, mm * mm - (m00 * m11 - m01 * m01)));
+    let l1 = mm + md;
+    let l2 = max(mm - md, 0.0);
+    var e1 = vec2f(0.0, 1.0);
+    if (abs(m01) > 1e-12) {
+      e1 = normalize(vec2f(m01, l1 - m00));
+    } else if (m00 >= m11) {
+      e1 = vec2f(1.0, 0.0);
+    }
+    p.axis1 = e1 * sqrt(l1);
+    p.scale2 = sqrt(l2);
+  }
   p.depth = ndc_depth(t.z, near, far);
   p.alpha = alpha;
   return p;

@@ -1,15 +1,15 @@
 {
   "comment": "Copied by scripts/sync_wgsl.py from the engine repository; change these files there, not here.",
   "pipeline": "wgsl/1",
-  "engine_commit": "ffa5c0deb866e039c72745c34b0bafb5950614ea",
+  "engine_commit": "6cbffd03c94395da16143b42feadbb088a15c0a9",
   "files": {
     "README.md": {
       "source": "frontend/src/render/wgsl/README.md",
-      "sha256": "a4dd363d92b1131b6e13950a9a621cf654a33373047424f0293df4a8ff4a5260"
+      "sha256": "496c013831a8ce53ef640b497817c374a1c8deb0828b5c32b33f7ef1580ecf0d"
     },
     "__init__.py": {
       "source": "world_engine/renderer/wgsl/__init__.py",
-      "sha256": "c5bc4a8b4b0c6e1ff397b858da278a54f52b73987f9b23169d1cddc537f958d7"
+      "sha256": "d8d118e45a436e44faa02db26ce75efa55c227418941a0f9f412da46206d3db4"
     },
     "_probe.py": {
       "source": "world_engine/renderer/wgsl/_probe.py",
@@ -21,19 +21,43 @@
     },
     "budget.py": {
       "source": "world_engine/renderer/wgsl/budget.py",
-      "sha256": "f961e269e85b67fb2c1586ed938268c30d879dc55ef42ebdfcc4c82e2cc5553c"
+      "sha256": "f5f83fb89c2fceb66e52d100312763ad67b8da71c9b7a5f1d680c1900fe87ade"
     },
     "common.wgsl": {
       "source": "frontend/src/render/wgsl/common.wgsl",
-      "sha256": "e9885f970cb038b0bc94b945333968699fe3b974e6bf0e981ead2ad3be9e4903"
+      "sha256": "ff5616bf5b8f7859c5a443309c3b651e06d39810e39add341dc4dbf473f80a44"
     },
-    "mesh_flat.wgsl": {
-      "source": "frontend/src/render/wgsl/mesh_flat.wgsl",
-      "sha256": "885a84195a3404f22a3e686adf6d93dbed2f2bfe95265c228eafcd268cf692df"
+    "cubeuv.wgsl": {
+      "source": "frontend/src/render/wgsl/cubeuv.wgsl",
+      "sha256": "08b02f30a30756e46a673e9a18dd1f3ba09130fa8efa1d3a974bb3f62effe7a7"
+    },
+    "lighting.py": {
+      "source": "world_engine/renderer/wgsl/lighting.py",
+      "sha256": "a561ec9e77ea1162ec5af6478212d5acb87c3f411684ddb2da469914ccad9915"
+    },
+    "material.wgsl": {
+      "source": "frontend/src/render/wgsl/material.wgsl",
+      "sha256": "9e900abef351a62bb58b4d0db6a812d07ec460ec508ee78d3003894d1b72df63"
+    },
+    "mesh.wgsl": {
+      "source": "frontend/src/render/wgsl/mesh.wgsl",
+      "sha256": "218cab3d9351d67d374539367e5e4a9301462bd3012798f62f7647b3cec48be1"
+    },
+    "mesh_data.py": {
+      "source": "world_engine/renderer/wgsl/mesh_data.py",
+      "sha256": "afd788d3c2dcb1cfa37f69710c1c3115c1bf9670e29b11367f95f849d6318506"
+    },
+    "mesh_pass.py": {
+      "source": "world_engine/renderer/wgsl/mesh_pass.py",
+      "sha256": "dd5208a6b4f7cf4a5d4bd04f269cc30b81baf7874813094f6257830396b8e016"
     },
     "pipeline.json": {
       "source": "frontend/src/render/wgsl/pipeline.json",
-      "sha256": "45486b37e0199da41206c2586de7ae2361eccaf6a0247dd615849739a6450957"
+      "sha256": "84675474229983334884ad838bb77df8675e356706e5ec1308ca61099558ad5a"
+    },
+    "pmrem.wgsl": {
+      "source": "frontend/src/render/wgsl/pmrem.wgsl",
+      "sha256": "1beebbdfda25b39fb7044bb672f3d3d8d906ae856306a4546e35aca50f5aa44b"
     },
     "preprocess.wgsl": {
       "source": "frontend/src/render/wgsl/preprocess.wgsl",
@@ -41,15 +65,15 @@
     },
     "render_wgsl.py": {
       "source": "world_engine/renderer/wgsl/render_wgsl.py",
-      "sha256": "4745442635f12073fcbf8312a639e325a5cf2e369ca83c1d1d186c05864e6fdf"
+      "sha256": "d3cb3dcc6b39aff6658ab704784182ad9025fea98630bd862224cec1f9091aa1"
     },
     "resolve.wgsl": {
       "source": "frontend/src/render/wgsl/resolve.wgsl",
       "sha256": "398064c223b93530d1556bf1928ddbd814b2ea73d6a94c56574ec567ecdda30c"
     },
-    "scene.py": {
-      "source": "world_engine/renderer/wgsl/scene.py",
-      "sha256": "e54ebfd1daa4f4adf7c5b2089cdd999c86c14a0c4989d6c71cfcc8192fa5bc4e"
+    "shadow.wgsl": {
+      "source": "frontend/src/render/wgsl/shadow.wgsl",
+      "sha256": "6d2a494c5c236ddd45a5da4294f2ece1b34265d05a1d9c676a2c9c7e76f37acc"
     },
     "sort.wgsl": {
       "source": "frontend/src/render/wgsl/sort.wgsl",
@@ -57,7 +81,7 @@
     },
     "splat.wgsl": {
       "source": "frontend/src/render/wgsl/splat.wgsl",
-      "sha256": "502672bd18df0af31d82ce36ee55562bbdd06b4198c645687cb7c147e08c0cbe"
+      "sha256": "8abd95f2e2e3f8ba1058a18feca323fb20d873ca454122bbc357ba2e8fc58bde"
     },
     "splat_data.py": {
       "source": "world_engine/renderer/wgsl/splat_data.py",

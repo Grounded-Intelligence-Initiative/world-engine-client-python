@@ -256,9 +256,8 @@ def gpu_budget(
     *,
     batch: int | None = None,
     sort_batch: int | None = None,
-    mesh_vertices: int = 0,
-    mesh_indices: int = 0,
-    mesh_owners: int = 0,
+    mesh_buffers: list[int] | None = None,
+    mesh_parts: dict[str, int] | None = None,
     depth_readback: bool = False,
     binding_limit: int = WEBGPU_DEFAULT_LIMITS["max-storage-buffer-binding-size"],
     buffer_limit: int = WEBGPU_DEFAULT_LIMITS["max-buffer-size"],
@@ -268,8 +267,10 @@ def gpu_budget(
     """What ``SplatRenderer`` allocates for this scene (camera_sizes: (w, h) each).
     batch: cameras per batch (None: as many as one binding holds). sort_batch:
     the sort buffers are already allocated for this many cameras (a renderer
-    whose camera set changed keeps them). color_bytes: bytes per pixel of the
-    colour target (4 for rgba8unorm, 8 for rgba16float, 16 for rgba32float);
+    whose camera set changed keeps them). mesh_buffers / mesh_parts: what the
+    mesh pass allocates (``mesh_pass.mesh_budget``: its buffers and textures in
+    creation order, and their bytes by kind). color_bytes: bytes per pixel of
+    the colour target (4 for rgba8unorm, 8 for rgba16float, 16 for rgba32float);
     resolve: an rgba8unorm texture per camera receives the 8-bit resolve."""
     layout = plan_layout(n_splats, sh_degree, binding_limit, buffer_limit)
     n_cam = len(camera_sizes)
@@ -292,8 +293,8 @@ def gpu_budget(
     dev += per_batch_buffers(layout, b_cam)
     dev += [REC_BYTES * ln for _, ln in layout.rec_ranges()]
     dev.append(6 * 4 * layout.rec_chunk)
-    if mesh_vertices:
-        dev += [32 * mesh_vertices, 4 * mesh_indices, 64 * max(1, mesh_owners)]
+    if mesh_buffers:
+        dev += list(mesh_buffers)
     dev += [color_bytes * w * h for w, h in camera_sizes]  # colour target
     dev += [4 * w * h for w, h in camera_sizes]  # depth32float
     if resolve:
@@ -313,8 +314,8 @@ def gpu_budget(
         readback += readback_row_bytes(w) * h * (2 if depth_readback else 1)
     b.parts["camera targets"] = targets
     b.parts["readback"] = readback
-    if mesh_vertices:
-        b.parts["meshes"] = 32 * mesh_vertices + 4 * mesh_indices + 64 * max(1, mesh_owners)
+    for k, v in (mesh_parts or {}).items():
+        b.parts[k] = int(v)
     b.parts["uniforms"] = UNIFORM_SLOT * (1 + n_dispatch) + CAMERA_BYTES * MAX_CAMS + 16 * n_batches
     b.largest_buffer = max(
         4 * sh_words(sh_degree) * min(n_splats, layout.source_chunk),

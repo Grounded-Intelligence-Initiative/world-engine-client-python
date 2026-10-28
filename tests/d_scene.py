@@ -1,6 +1,7 @@
 """A small real scene for renderer D (render protocol 2), served by the
-platform stand-in (platform_stub.py): the golden splat PLY, a red GLB box off
-the origin, one robot link (WEL1), two cameras of different sizes.
+platform stand-in (platform_stub.py): the golden splat PLY, a red box off the
+origin (its GLB, which the browser path draws, and the engine's WEM1 of it,
+which renderer D draws), one robot link (WEL1), two cameras of different sizes.
 
 ``DPlatform(stub, encrypted=...)`` answers protocol 2 to a client that offers
 it with pipeline wgsl/1, protocol 1 otherwise (as the engine does), and sends a
@@ -21,8 +22,9 @@ CAMS = json.loads((GOLDEN / "cameras.json").read_text())
 BOX_AT = [0.25, -0.1, 0.05]
 
 
-def box_glb(size=0.2, rgba=(1.0, 0.0, 0.0, 1.0)) -> bytes:
-    """A GLB of an axis-aligned cube, one material (linear base colour)."""
+def _box(size: float) -> tuple[np.ndarray, np.ndarray]:
+    """An axis-aligned cube: 24 vertices (float32), triangles counter-clockwise
+    from outside (uint32, flat)."""
     h = size / 2
     v, f = [], []
     for axis in range(3):
@@ -35,8 +37,12 @@ def box_glb(size=0.2, rgba=(1.0, 0.0, 0.0, 1.0)) -> bytes:
             base = len(v)
             v += [(n + a * u + b * w) * h for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
             f += [base, base + 1, base + 2, base, base + 2, base + 3]
-    pos = np.asarray(v, np.float32)
-    idx = np.asarray(f, np.uint32)
+    return np.asarray(v, np.float32), np.asarray(f, np.uint32)
+
+
+def box_glb(size=0.2, rgba=(1.0, 0.0, 0.0, 1.0)) -> bytes:
+    """A GLB of an axis-aligned cube, one material (linear base colour)."""
+    pos, idx = _box(size)
     bin_ = pos.tobytes() + idx.tobytes()
     gltf = {
         "asset": {"version": "2.0"},
@@ -61,6 +67,63 @@ def box_glb(size=0.2, rgba=(1.0, 0.0, 0.0, 1.0)) -> bytes:
     return struct.pack("<4sII", b"glTF", 2, 12 + len(body)) + body
 
 
+def box_wem1(size=0.2, rgba=(1.0, 0.0, 0.0, 1.0)) -> bytes:
+    """What the engine compiles box_glb(size, rgba) into (world_engine/assets/
+    wem1.py, glb_to_wem1): WEM1, version 1. The GLB has no normals, so renderer
+    D shades it flat; glTF's defaults make it metallic with roughness 1.
+    tests/test_wgsl_vendored.py checks this against the engine's converter when
+    it has an engine checkout."""
+    pos, idx = _box(size)
+    body, parts = 0, []
+
+    def add(raw: bytes) -> int:
+        nonlocal body
+        off = body
+        raw += b"\0" * (-len(raw) % 4)
+        parts.append(raw)
+        body += len(raw)
+        return off
+
+    p64 = pos.astype(np.float64)
+    lo, hi = p64.min(0), p64.max(0)
+    prim = {
+        "vertices": len(pos),
+        "triangles": len(idx) // 3,
+        "center": [float(v) for v in (lo + hi) / 2],
+        "position": [add(pos.astype("<f4").tobytes()), int(pos.size)],
+        "index": [add(idx.astype("<u4").tobytes()), int(idx.size)],
+        "material": 0,
+    }
+    material = {
+        "name": "",
+        "type": "standard",
+        "color": [float(v) for v in rgba[:3]],
+        "opacity": float(rgba[3]),
+        "metalness": 1.0,
+        "roughness": 1.0,
+        "side": "front",
+        "alpha_mode": "OPAQUE",
+        "alpha_test": 0.0,
+        "normal_scale": [1.0, 1.0],
+        "ao_intensity": 1.0,
+        "emissive": [0.0, 0.0, 0.0],
+        "maps": {},
+    }
+    doc = {
+        "version": 1,
+        "generator": "world_engine.assets.wem1",
+        "primitives": [prim],
+        "materials": [material],
+        "images": [],
+        "bounds": [lo.tolist(), hi.tolist()],
+        "unsupported": [],
+    }
+    js = json.dumps(doc, separators=(",", ":")).encode()
+    js += b" " * (-len(js) % 4)
+    data = b"".join(parts)
+    return b"WEM1" + struct.pack("<III", 1, len(js), len(data)) + js + data
+
+
 def link_wel1() -> bytes:
     """A small grey tetrahedron as a preset robot link (the engine's WEL1)."""
     v = np.array([[0, 0, 0], [0.05, 0, 0], [0, 0.05, 0], [0, 0, 0.05]], "<f4")
@@ -71,6 +134,7 @@ def link_wel1() -> bytes:
 ASSETS = {
     "/__asset/0.ply": (GOLDEN / "scene.ply").read_bytes(),
     "/__asset/1.glb": box_glb(),
+    "/__asset/1.wem1": box_wem1(),
 }
 ROBOT = {"/__robot/0.bin": link_wel1()}
 
@@ -96,6 +160,7 @@ class DPlatform(Platform):
                 {
                     "id": "box",
                     "url": "/__asset/1.glb",
+                    "wem": "/__asset/1.wem1",
                     "scale": [1, 1, 1],
                     "pos": BOX_AT,
                     "quat": [0, 0, 0, 1],

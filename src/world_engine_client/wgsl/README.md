@@ -1,10 +1,12 @@
-# D's splat pipeline (`wgsl/1`)
+# D's pipeline (`wgsl/1`)
 
 This directory is the only WGSL source of renderer D (design doc 16 §9). The
 Python host (`world_engine/renderer/wgsl/`, which world-engine-client ships a
 copy of together with these files), the browser host (M-D4) and a Node+Dawn
-test host all load these files unchanged. The mesh pass here (`mesh_flat.wgsl`)
-is a stand-in until M-D2's PBR shader.
+test host all load these files unchanged. M-D1 made the splat pass; M-D2 the
+mesh pass (three.js's MeshStandardMaterial as the capture page draws it), the
+key light's shadow map, and the environment prefilter (three's
+PMREMGenerator); M-D3 the colour target above 8 bits and its resolve.
 
 ## Modules
 
@@ -12,13 +14,15 @@ is a stand-in until M-D2's PBR shader.
 files. A module's source is the files joined in that order; `common.wgsl` comes
 first and declares no bindings.
 
-| module | entry points |
-|---|---|
-| `preprocess` | `cull`, `scan_groups`, `compact`, `project_sorted` |
-| `sort` | `sort_histogram`, `sort_scan`, `sort_scatter` |
-| `splat` | `vs_splat`, `fs_splat` |
-| `mesh_flat` | `vs_mesh`, `fs_mesh` |
-| `resolve` | `vs_resolve`, `fs_resolve` |
+| module | files | entry points |
+|---|---|---|
+| `preprocess` | common, preprocess | `cull`, `scan_groups`, `compact`, `project_sorted` |
+| `sort` | common, sort | `sort_histogram`, `sort_scan`, `sort_scatter` |
+| `splat` | common, splat | `vs_splat`, `fs_splat` |
+| `mesh` | common, cubeuv, material, mesh | `vs_mesh`, `fs_mesh` |
+| `shadow` | material, shadow | `vs_shadow` (depth only), `vs_shadow_masked` with `fs_shadow_masked` |
+| `pmrem` | cubeuv, pmrem | `vs_plane` with `fs_cube`, `fs_equirect`, `fs_blur`, `fs_room` |
+| `resolve` | resolve | `vs_resolve`, `fs_resolve` |
 
 ## Limits
 
@@ -46,6 +50,95 @@ CPU adapter, `float32-blendable` for an `rgba32float` colour target (see below).
 arguments of each record chunk's `project_sorted` dispatch and its
 `drawIndexedIndirect`. `sort_args` holds 4 u32 per batch: the dispatch size of
 the sort (tiles of the largest segment, 1, cameras in the batch).
+
+## Meshes
+
+The mesh pass draws three's MeshStandardMaterial (three 0.180) the way the
+capture page (`frontend/src/sceneRenderer.ts`) sets its meshes up; `mesh.wgsl`
+names the shader chunks it follows. Lighting is computed in three's view space
+(x right, y up, z towards the viewer), so the screen-derivative terms
+(flat shading, derivative tangents, geometryRoughness) come out as in GLSL;
+WGSL's `dpdy` runs down the framebuffer, so the shader negates it. Output:
+Neutral tone mapping (exposure 1), then the sRGB transfer function (three's
+`pow(c, 0.41666)`), written to the camera's colour target (see Colour target),
+which the splats then blend over.
+
+Vertex buffer, one interleaved stream of 80 bytes: position (f32x3, location 0),
+normal (f32x3, 1; zero for flat-shaded meshes), uv (f32x2, 2), uv1 (f32x2, 3),
+colour (f32x4, 4; linear, ones without COLOR_0), tangent (f32x4, 5; zero without
+TANGENT), owner index (u32, 6). The owner's scale is in the vertices (normals
+divided by it, triangles reversed for a mirroring scale, as three flips the
+front face); the owner array holds the rest of the world matrix.
+
+Bindings of `mesh`: group 0: `cams` (the splat pass's camera array), the
+`Dispatch` slot of the camera (dynamic offset, `D.cam`), `owners` (storage: per
+owner the model matrix and the inverse transpose of its 3x3), `MeshFrame`
+(uniform: key light direction and colour, environment intensity, rotation and
+atlas geometry, the shadow matrix and parameters, flags), the environment atlas
+(rgba16float) with a linear clamp sampler, the shadow map (depth32float).
+Group 1, one bind group per material (declared in `material.wgsl`, which the
+`mesh` and `shadow` modules share): the `Material` uniform (base colour,
+opacity, emissive, metalness, roughness, AO intensity, alpha test, normal scale,
+flags, uv channel per map, three's uv matrix per map) and six textures with
+their samplers (map, normal, roughness, metalness, AO, emissive; map and
+emissive are rgba8unorm-srgb, the rest rgba8unorm; unused slots get a white
+1x1). Hosts cull back faces (front face counter-clockwise) except for
+double-sided materials, depth compare less-equal; a material from a glTF BLEND
+mode is drawn opaque without depth writes (the capture page forces GLB
+materials opaque, GLTFLoader's depthWrite stays false).
+
+Draw order is three's opaque order, which decides what shows where a material
+without depth writes overlaps another, and which coplanar surface wins:
+materials in the order they were made (scene_init's objects in order, the
+proxy boxes among them, then the robot links, then the end-effector box; a
+GLB's materials in order of first use), and the draws of a material without
+depth writes one primitive at a time, per camera, by the depth of the
+primitive's centre along the view direction, nearest first (three's z; WEM1
+records the centre GLTFLoader's bounding sphere has). The index buffer is laid
+out for the shadow pass instead (casters by culling mode, then material), so
+the camera pass draws each material's range out of that order.
+
+Shadow map (`shadow.wgsl`): one per frame, before the cameras, shared by all of
+them. three's DirectionalLightShadow with the editor's quality-tier settings:
+1024^2, PCF over 17 nearest taps with radius 6 texels, bias -0.0005, normal
+bias 0.02, the orthographic camera fitted to the meshes' bounds as
+`editorScene._fitShadowCamera` does. Depth is GL's 0.5 ndc + 0.5 in a
+depth32float target, rows in GL order (the vertex shader flips y), casters'
+front faces culled. Flat-shaded meshes never receive the shadow: three's
+shadow coordinate for a mesh without normals is NaN. A caster with a map and an
+alpha test (glTF MASK) is drawn with `vs_shadow_masked` / `fs_shadow_masked`,
+its material's bind group in group 1 (`material.wgsl`) and a vertex buffer
+layout with uv and uv1: three's depth material takes the caster's map and
+alphaTest, so the map's alpha alone (at the map's uv channel and transform)
+below alphaTest leaves a hole in the shadow.
+
+## Environment
+
+The meshes are lit by a CubeUV atlas (three's PMREM layout; `cubeuv.wgsl` reads
+it like `cube_uv_reflection_fragment.glsl.js`) times an intensity, rotated by
+three's envMapRotation, plus one directional key light. `pmrem.wgsl` makes the
+atlas the way PMREMGenerator does, each pass a viewport of 3 x 2 faces drawn
+with `vs_plane`: the source into the top mip (`fs_cube` for a cube map,
+`fs_equirect` for an HDRI, `fs_room` for three's RoomEnvironment ray cast at the
+pixel centres), then two half blurs per mip (`fs_blur`, latitudinal then
+longitudinal through a ping-pong atlas, three's weights, sample counts and pole
+axes). The host picks the set-up as the capture page does
+(`world_engine/renderer/wgsl/lighting.py`): a lighting asset (WELI1, the atlas
+prefiltered once) when the scene has one; else the HDRI; else the bake at the
+light probe; the studio room when the probe is black or dark or there are no
+splats. An HDRI goes up as rgba16float the way three's HDRLoader and EXRLoader
+fill HalfFloatType data (clamped to 65504, the mantissa truncated:
+`lighting.half_float_like_three`), with three's flipY (row 0 at v = 1).
+
+The bake is the capture page's: the splats alone on six 90-degree 128^2 faces
+from the probe point, colours decoded with `pow(c, 2.2)` (`Params.encode_linear`)
+and blended over a clear colour of (1, 1, 1) / 255 in the host's colour target
+(the page's cube target has 8 bits; the host rounds to 8 bits once, at the
+resolve, as for the cameras, so the adapters bake alike), the splats sized as
+the page's bake renderer sizes them: in Spark's pixels of the 1280 x 720 canvas
+(`Camera.rot0.w`, `rot1.w` give the scale) and capped at 256 px (the host writes
+`Params.max_pixel_radius` for the bake and puts it back after), the faces read
+back for the light probe and mipmapped (2x2 averages) before the prefilter.
 
 ## Splitting into bindings
 
@@ -82,9 +175,13 @@ batch, in one compute pass:
    `sort_scatter` dispatched indirectly from `sort_args`, `sort_scan` with
    workgroups (256, 1, cameras); the pairs end in keys_a / vals_a.
 
-Then per camera: a compute pass of `project_sorted`, once per (source chunk,
-record chunk), dispatched indirectly from the camera's state segment; a render
-pass (mesh pass, then one `drawIndexedIndirect` per record chunk with the shared
+Before the batches, when there are meshes: write the owners, the frame
+constants and the scrolled materials (a belt's maps: three's uv matrix with the
+offset `offset0 - L g travel`, mod 1, design doc 14 §7.2), and draw the shadow
+map. Then per camera: a compute pass of `project_sorted`, once per (source
+chunk, record chunk), dispatched indirectly from the camera's state segment; a
+render pass into the camera's colour target (the mesh draws in three's order,
+see Meshes, then one `drawIndexedIndirect` per record chunk with the shared
 index buffer `4q, 4q+1, 4q+2, 4q+2, 4q+1, 4q+3`); the `resolve` pass, one
 full-target triangle that reads the colour target texel by texel (an
 `unfilterable-float` texture binding) into an `rgba8unorm` texture; a copy of
@@ -125,8 +222,8 @@ Projection, quad and alpha follow Spark's `splatVertex.glsl` and
 `splatFragment.glsl`: EWA covariance plus 0.3 px² with the opacity compensated,
 an eigenvector-aligned quad of sqrt(8) standard deviations capped at 512 px,
 centres beyond 1.4 times the NDC square culled, alpha below 0.5/255 culled and
-discarded, no alpha cap (into an 8-bit target the fragment discard changes no
-pixel: below 0.5/255 a fragment moves a channel by less than half a step).
+discarded, no alpha cap (in Spark's 8-bit target such a fragment would move a
+channel by less than half a step).
 Colour is SH up to degree 3 with Spark's constants, the base colour clamped
 before the view-dependent part is added, kept in 8 bits.
 Splats are sorted by distance to the camera centre (Spark's `sortRadial`).
@@ -140,6 +237,16 @@ coefficient before upload (`Splats.finite_mask`): WGSL lets an implementation
 assume there is no NaN or Inf.
 
 ## Pitfalls
+
+- Half-float render targets round writes towards zero on the RTX 4090 and on
+  lavapipe, so a constant environment drifts down by a few half-float steps over
+  the blur passes (three's PMREM on WebGL does the same).
+- Spark sizes the bake's splats by its renderSize (the canvas, 1280 x 720 in the
+  headless page), not by the cube target, and the page bakes through a second
+  SparkRenderer with maxPixelRadius 256: SceneEnvironmentBaker reuses the
+  scene's renderer only when its enableLod matches the splat mesh's LoD mode,
+  and Spark 2.1.0 defaults enableLod to true. With the scene renderer's 512 px
+  cap the bake's large splats come out twice too big.
 
 - lavapipe (Mesa 25.1, LLVM 15) stores the first lane's value when one
   invocation writes its own value to an address the compiler can prove uniform,

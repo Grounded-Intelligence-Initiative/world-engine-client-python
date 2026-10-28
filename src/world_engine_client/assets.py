@@ -5,9 +5,9 @@ arrived: DAC1 ciphertext from the hosting platform, plain files from your own
 local ``world-engine serve``. :func:`read` decrypts one of them into memory and
 checks it against its digest; the renderer parses the bytes from there
 (``world_engine_client.wgsl.splat_data`` views a PLY with a numpy structured
-dtype, ``wgsl.scene`` reads GLB meshes and robot links) and uploads them to the
-GPU. No plaintext is written to a file at any point; the buffer is dropped once
-it is on the GPU.
+dtype, ``wgsl.mesh_data`` reads the objects' WEM1 and the robot links' WEL1,
+``wgsl.lighting`` an HDRI) and uploads them to the GPU. No plaintext is written
+to a file at any point; the buffer is dropped once it is on the GPU.
 """
 
 from __future__ import annotations

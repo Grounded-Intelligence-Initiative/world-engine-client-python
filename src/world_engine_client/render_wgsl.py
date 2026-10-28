@@ -11,6 +11,12 @@ a copy of the engine's; a server never sends shaders). ``render(state)``
 returns ``{camera name: (H, W, 3) uint8}``, read straight from the GPU into
 numpy, with no browser and no image encoding. Each camera has its own size.
 
+Pipeline wgsl/1 draws the splats as Spark does and the meshes as the engine's
+capture page does: three.js's MeshStandardMaterial from the objects' WEM1 (the
+engine compiles each GLB) and the robot links, lit by the scene's own lighting
+baked at its light probe (or its HDRI, or three's room environment), plus the
+key light's shadow, blended above 8 bits and rounded to 8 bits once.
+
 The adapter: a hardware GPU first, then a software one (Mesa's lavapipe, the
 bundled SwiftShader of world-engine-swiftshader, Windows' WARP), each probed
 in a subprocess; see :mod:`world_engine_client.wgsl.adapters`. A software
@@ -31,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import struct
 import threading
 import time
 from pathlib import Path
@@ -53,9 +60,11 @@ class NoRenderAdapter(RendererError):
 
 
 class SceneNotDrawable(RendererError):
-    """Renderer D cannot draw this scene: an asset it does not read (``code``
-    asset_mismatch: a PLY or GLB it does not take), or more than the device's
-    memory holds (renderer_unavailable). The browser path may still draw it."""
+    """Renderer D cannot draw this scene as the browser path would: an asset it
+    does not read (``code`` asset_mismatch: a splat PLY, a WEM1 mesh or an HDRI
+    it does not take, a mesh the server sent without its WEM1), or more than
+    the device's memory holds (renderer_unavailable). The browser path may
+    still draw it."""
 
 
 def available() -> bool:
@@ -289,8 +298,7 @@ class WGSLRenderer:
     ):
         from .wgsl import adapters
         from .wgsl.budget import SplatMemoryError
-        from .wgsl.render_wgsl import create_device
-        from .wgsl.scene import SceneRenderer
+        from .wgsl.render_wgsl import WgslRenderer, create_device
 
         mode = _mode_of(bundle)
         self.assets: SceneAssets | None = None
@@ -331,16 +339,19 @@ class WGSLRenderer:
                 ) from exc
             started = time.perf_counter()
             try:
-                self._scene = SceneRenderer(
+                # strict: what D would leave out or light otherwise than the
+                # capture page raises, so the browser path draws the scene
+                self._scene = WgslRenderer(
                     scene_init,
                     self._read,
                     device=self.device,
                     color_format=color_format,
                     wgsl_dir=WGSL_DIR,
+                    strict=True,
                 )
             except SplatMemoryError as exc:
                 raise SceneNotDrawable(str(exc), code="renderer_unavailable") from None
-            except ValueError as exc:  # a PLY or GLB this renderer cannot read
+            except (ValueError, KeyError, IndexError, struct.error) as exc:  # unreadable asset
                 raise SceneNotDrawable(
                     f"the scene's assets cannot be drawn: {exc}", code="asset_mismatch"
                 ) from None
@@ -369,6 +380,8 @@ class WGSLRenderer:
             "step": c.step,
             "color_format": self._scene.color_format if self._scene else None,
         }
+        if self._scene is not None:
+            out["lighting"] = self._scene.info.get("lighting")
         if c.software:
             failed = [f"{t['step']}: {t.get('error')}" for t in c.trail if not t.get("ok")]
             out["reason"] = "; ".join(failed) or "no hardware adapter"

@@ -1,23 +1,31 @@
-"""D's WGSL splat renderer: the Python host (wgpu-py), M-D1 development version.
+"""D's WGSL renderer: the Python host (wgpu-py) of pipeline wgsl/1 (M-D1 to M-D3).
 
 Design doc 16 §9. The WGSL comes from one place, ``frontend/src/render/wgsl/``
 (``pipeline.json`` lists the modules); this host never carries shader text.
-It imports nothing from world_engine, only numpy, wgpu and its two sibling
-modules, so M-D3 can move the three files into world-engine-client as
-``render_wgsl.py`` (+ ``assets.py`` for splat_data, + budget) and ship the WGSL
-directory inside the wheel; ``default_wgsl_dir`` already looks for a ``wgsl/``
-directory next to this file.
+It imports nothing from world_engine, only numpy, wgpu, Pillow and its sibling
+modules: world-engine-client ships a copy of this directory and of the WGSL
+(its ``scripts/sync_wgsl.py``), and ``default_wgsl_dir`` finds the shaders next
+to this file there.
 
 Per frame, one command buffer. Cameras go in batches (as many as one binding of
 sort keys holds, at most 16): per batch one compute pass culls, compacts and
-sorts every camera of the batch at once (workgroup_id.z = camera); then per
-camera a compute pass projects the sorted splats into records, a render pass
-draws the placeholder meshes (when given) and the splats, and a copy puts the
-colour target into one readback buffer. One map at the end gives every camera
-as (H, W, 3) uint8.
+sorts every camera of the batch at once (workgroup_id.z = camera); before the
+cameras, the key light's shadow map (when there are meshes and a key light);
+then per camera a compute pass projects the sorted splats into records, a
+render pass draws the meshes (three's MeshStandardMaterial, ``mesh.wgsl``) and
+then the splats into a colour target of more than 8 bits (rgba16float on a GPU,
+rgba32float on a CPU adapter: ``default_color_format``), a resolve pass rounds
+it to rgba8unorm once (``resolve.wgsl``), and a copy puts that into one
+readback buffer. One map at the end gives every camera as (H, W, 3) uint8.
 
-Not in M-D1: PBR meshes and lighting (M-D2), protocol negotiation, adapter
-probing and fallback (M-D3), the browser host (M-D4).
+``SplatRenderer`` takes the parts (splats, a ``MeshScene``, a ``Lighting``);
+``WgslRenderer`` builds them from a session's scene_init and asset bytes the
+way the capture page does (meshes from WEM1, robot links from WEL1, lighting
+with the bake at the light probe and its fallbacks) and renders render_state
+dicts: world-engine-client's renderer D and the engine's ``wgsl`` backend both
+draw through it. The adapter search is ``adapters.py``; which scenes wgsl/1
+draws, the engine's ``serving/render_protocol.py``. Not here: the browser host
+(M-D4).
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ import math
 import os
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +56,37 @@ from .budget import (
     readback_row_bytes,
     sh_coeffs,
     sh_words,
+)
+from .lighting import (
+    BAKE_MAX_PIXEL_RADIUS,
+    BAKE_RENDER_SIZE,
+    BAKE_SIZE,
+    ENV_ROTATION_ZUP,
+    PROBE_HEIGHT,
+    PROBE_MARGIN_WARN,
+    SCENE_ENV_MIN_MEAN,
+    SCENE_KEY_INTENSITY,
+    STUDIO_ENV_INTENSITY,
+    STUDIO_KEY_DIR,
+    STUDIO_KEY_INTENSITY,
+    STUDIO_SIGMA,
+    STUDIO_SIZE,
+    Lighting,
+    bake_cameras,
+    dominant_light_direction,
+    half_float_like_three,
+    probe_report,
+    read_hdri,
+    read_weli1,
+    scene_intensity,
+)
+from .mesh_data import Material, MeshScene, Primitive, srgb_to_linear
+from .mesh_pass import (
+    MeshPass,
+    ShadowParams,
+    cube_mips,
+    mesh_budget,
+    upload_texture,
 )
 from .splat_data import Splats, quat_xyzw_to_matrix
 
@@ -201,32 +240,31 @@ class SplatParams:
     clear_rgb: tuple[int, int, int] = (0x0B, 0x0D, 0x10)  # the capture page's clear colour
 
 
-@dataclass
 class MeshSet:
-    """Opaque meshes for the placeholder pass: vertices (V, 8) float32 laid out
-    as pos.xyz, normal.xyz, rgba8 (as f32 bits), owner index (as f32 bits);
-    indices (F, 3) uint32; owners: one key per transform slot."""
-
-    vertices: np.ndarray
-    indices: np.ndarray
-    owners: list = field(default_factory=list)
+    """M-D1's placeholder mesh input, kept for the tests and benches that build
+    meshes by hand: ``build(parts, owners)`` with parts (v (n, 3), f (m, 3),
+    normals (n, 3), rgba 0-1 (display-referred), owner index) and owners
+    (kind, key) gives a MeshScene of plain MeshStandardMaterials (colour
+    decoded from sRGB, metalness 0, roughness 0.5)."""
 
     @staticmethod
-    def build(parts, owners) -> MeshSet:
-        """parts: (v (n,3), f (m,3), normals (n,3), rgba 0-1 ((4,) or (n,4)), owner index)."""
-        vs, fs, base = [], [], 0
+    def build(parts, owners) -> MeshScene:
+        sc = MeshScene()
+        for kind, key in owners:
+            sc.owner(str(kind), str(key))
         for v, f, nrm, rgba, oi in parts:
-            col = np.clip(np.round(np.asarray(rgba, float) * 255), 0, 255).astype(np.uint8)
-            col = np.ascontiguousarray(np.broadcast_to(col.reshape(-1, 4), (len(v), 4)))
-            rec = np.zeros((len(v), 8), np.float32)
-            rec[:, :3] = v
-            rec[:, 3:6] = nrm
-            rec[:, 6] = col.view(np.uint32).reshape(-1).view(np.float32)
-            rec[:, 7] = np.full(len(v), oi, np.uint32).view(np.float32)
-            vs.append(rec)
-            fs.append(np.asarray(f, np.uint32) + base)
-            base += len(v)
-        return MeshSet(np.concatenate(vs), np.concatenate(fs), list(owners))
+            col = srgb_to_linear(np.asarray(rgba, float)[:3])
+            mi = sc.add_material(Material(color=tuple(col.tolist()), metalness=0.0, roughness=0.5))
+            sc.add_primitive(
+                int(oi),
+                Primitive(
+                    np.asarray(v, np.float32),
+                    np.asarray(f, np.uint32).reshape(-1, 3),
+                    mi,
+                    normals=np.asarray(nrm, np.float32),
+                ),
+            )
+        return sc
 
 
 def camera_uniform(c: dict) -> np.ndarray:
@@ -237,6 +275,9 @@ def camera_uniform(c: dict) -> np.ndarray:
     f = 0.5 * h / math.tan(math.radians(float(c["fov_y_deg"])) / 2.0)
     u = np.zeros(24, np.float64)
     u[0:3], u[4:7], u[8:11] = r[:, 0], r[:, 1], r[:, 2]
+    rs = c.get("spark_render_size")  # Spark sizes splats in these pixels (the bake)
+    if rs and (int(rs[0]), int(rs[1])) != (w, h):
+        u[3], u[7] = float(rs[0]) / w, float(rs[1]) / h
     u[12:15] = c["pos"]
     u[16:20] = (f, f, w / 2.0, h / 2.0)
     u[20:24] = (w, h, float(c["near"]), float(c["far"]))
@@ -487,9 +528,14 @@ def sort_segments(
 
 
 class SplatRenderer:
-    """Render a splat scene (plus optional placeholder meshes) from up to 16
-    cameras, each with its own size. ``render(state)`` takes a render_state-shaped
-    dict and returns ``{camera name: (H, W, 3) uint8}``.
+    """Render a splat scene, and meshes when given, from up to 16 cameras, each
+    with its own size. ``render(state)`` takes a render_state-shaped dict and
+    returns ``{camera name: (H, W, 3) uint8}``.
+
+    meshes: a MeshScene (mesh_data). lighting: what lights them (lighting.Lighting;
+    None: a constant environment of radiance 1 and no key light). shadows: the
+    key light's shadow map (True or a ShadowParams: the editor's quality tier;
+    None: none).
 
     batch: cameras sorted together (None: as many as one binding of keys holds).
     binding_limit: lower the storage binding limit below the device's (tests use
@@ -508,7 +554,9 @@ class SplatRenderer:
         splats: Splats,
         cameras: list[dict],
         *,
-        meshes: MeshSet | None = None,
+        meshes: MeshScene | None = None,
+        lighting: Lighting | None = None,
+        shadows: ShadowParams | bool | None = None,
         adapter="auto",
         device=None,
         batch: int | None = None,
@@ -551,6 +599,11 @@ class SplatRenderer:
             bind = min(bind, int(binding_limit))
         self.binding_limit = bind
         self.meshes = meshes
+        if meshes is not None and lighting is None:
+            lighting = Lighting.uniform(1.0)
+        self.lighting = lighting
+        self.shadow_params = ShadowParams() if shadows is True else (shadows or None)
+        self.mesh = None
         self.depth_readback = depth_readback
         self.memory_limit = memory_limit
         self.upload_chunk = max(256, int(upload_chunk) // 4 * 4)
@@ -573,11 +626,8 @@ class SplatRenderer:
         sizes = [(int(c["w"]), int(c["h"])) for c in cameras]
         self._mesh_kw = {}
         if meshes is not None:
-            self._mesh_kw = {
-                "mesh_vertices": len(meshes.vertices),
-                "mesh_indices": int(meshes.indices.size),
-                "mesh_owners": len(meshes.owners),
-            }
+            bufs, parts = mesh_budget(meshes, lighting, self.shadow_params)
+            self._mesh_kw = {"mesh_buffers": bufs, "mesh_parts": parts}
         self._batch_arg = batch
         self.budget: Budget = self._plan(sizes)
         self.layout: Layout = self.budget.layout
@@ -735,15 +785,18 @@ class SplatRenderer:
             0, U.INDEX, (quads + np.array([0, 1, 2, 2, 1, 3], np.uint32)).ravel()
         )
         if self.meshes is not None:
-            self.b_mesh_vtx = self._buffer(0, U.VERTEX, self.meshes.vertices)
-            self.b_mesh_idx = self._buffer(
-                0, U.INDEX, self.meshes.indices.astype(np.uint32).ravel()
+            self.mesh = MeshPass(
+                dev,
+                sources,
+                self.meshes,
+                self.lighting,
+                self.shadow_params,
+                cams_buf=self.b_cams,
+                make_buffer=self._buffer,
             )
-            self.n_mesh_index = int(self.meshes.indices.size)
-            self.b_owners = self._buffer(64 * max(1, len(self.meshes.owners)), st)
 
         # pipelines and bind groups
-        self.kernels = ComputeKernels(dev, sources)
+        self.kernels = ComputeKernels(dev, {m: sources[m] for m in ("preprocess", "sort", "splat")})
         mods = self.kernels.modules
         self.pipe = self.kernels.pipe
         g1 = self.kernels.group1
@@ -798,37 +851,6 @@ class SplatRenderer:
                 "targets": [{"format": fmt, "blend": blend}],
             },
         )
-        if self.meshes is not None:
-            self.p_mesh = dev.create_render_pipeline(
-                layout=dpl,
-                vertex={
-                    "module": mods["mesh_flat"],
-                    "entry_point": "vs_mesh",
-                    "buffers": [
-                        {
-                            "array_stride": 32,
-                            "attributes": [
-                                {"format": "float32x3", "offset": 0, "shader_location": 0},
-                                {"format": "float32x3", "offset": 12, "shader_location": 1},
-                                {"format": "unorm8x4", "offset": 24, "shader_location": 2},
-                                {"format": "uint32", "offset": 28, "shader_location": 3},
-                            ],
-                        }
-                    ],
-                },
-                # three.js FrontSide: counter-clockwise in NDC (y up) is the front face
-                primitive={"topology": "triangle-list", "front_face": "ccw", "cull_mode": "back"},
-                depth_stencil={
-                    "format": "depth32float",
-                    "depth_write_enabled": True,
-                    "depth_compare": "less",
-                },
-                fragment={
-                    "module": mods["mesh_flat"],
-                    "entry_point": "fs_mesh",
-                    "targets": [{"format": fmt}],
-                },
-            )
         if self.resolves:
             # the colour target, read texel by texel into rgba8unorm (resolve.wgsl)
             self.bgl_resolve = dev.create_bind_group_layout(
@@ -840,12 +862,13 @@ class SplatRenderer:
                     }
                 ]
             )
+            m_resolve = dev.create_shader_module(code=sources["resolve"], label="resolve")
             self.p_resolve = dev.create_render_pipeline(
                 layout=dev.create_pipeline_layout(bind_group_layouts=[self.bgl_resolve]),
-                vertex={"module": mods["resolve"], "entry_point": "vs_resolve"},
+                vertex={"module": m_resolve, "entry_point": "vs_resolve"},
                 primitive={"topology": "triangle-list", "cull_mode": "none"},
                 fragment={
-                    "module": mods["resolve"],
+                    "module": m_resolve,
                     "entry_point": "fs_resolve",
                     "targets": [{"format": wgpu.TextureFormat.rgba8unorm}],
                 },
@@ -975,36 +998,29 @@ class SplatRenderer:
             "scan_groups", {3: self.fb["groups"], 6: self.fb["state"], 10: self.b_sort_args}
         )
         self.bg_draw = [self._draw_group(rb) for rb in self.b_recs]
-        if self.meshes is not None:
-            self.bg_mesh = self._draw_group(self.b_owners)
+        if self.mesh is not None:
+            self.mesh.bind_frame(self.b_disp, UNIFORM_SLOT)
         self.sizes = list(sizes)
 
     # ------------------------------------------------------------------ frame
-    def owner_transforms(self, state: dict) -> np.ndarray | None:
-        """(n_owners, 4, 4) from a render_state's bodies and robot links."""
-        if self.meshes is None:
-            return None
-        index = {key: i for i, key in enumerate(self.meshes.owners)}
-        t = np.tile(np.eye(4), (len(self.meshes.owners), 1, 1))
-        for b in state.get("bodies") or []:
-            i = index.get(("body", b["id"]))
-            if i is not None:
-                t[i] = _quat_to_matrix4(b)
-        for ln, pose in ((state.get("robot") or {}).get("links") or {}).items():
-            i = index.get(("link", ln))
-            if i is not None:
-                t[i] = _quat_to_matrix4(pose)
-        return t
-
     def render(self, state: dict) -> dict[str, np.ndarray]:
         """render_state -> {camera name: (H, W, 3) uint8}."""
         cams = list(state["cameras"])
-        images = self.render_cameras(cams, self.owner_transforms(state))
+        images = self.render_cameras(cams, state)
         return {c["name"]: im for c, im in zip(cams, images, strict=True)}
 
     def render_cameras(
-        self, cams: list[dict], owner_transforms: np.ndarray | None = None
+        self,
+        cams: list[dict],
+        state: dict | None = None,
+        *,
+        draw_meshes: bool = True,
+        clear_rgb: tuple[int, int, int] | None = None,
     ) -> list[np.ndarray]:
+        """Render these cameras; the meshes take their poses from ``state``
+        (bodies, robot links, surfaces; the poses persist across calls, as the
+        capture page keeps an object's last pose). draw_meshes False and
+        clear_rgb are for the environment bake."""
         wgpu = self._wgpu
         dev = self.device
         sizes = [(int(c["w"]), int(c["h"])) for c in cams]
@@ -1016,13 +1032,14 @@ class SplatRenderer:
             cu[i] = camera_uniform(c)
         dev.queue.write_buffer(self.b_cams, 0, cu)
         dev.queue.write_buffer(self.b_sort_args, 0, self.sort_args_init)
-        if self.meshes is not None and owner_transforms is not None:
-            ot = np.ascontiguousarray(np.asarray(owner_transforms, np.float32).transpose(0, 2, 1))
-            dev.queue.write_buffer(self.b_owners, 0, ot)
         timer = self._timer
         enc = dev.create_command_encoder()
+        meshes = self.mesh is not None and draw_meshes
+        if meshes:
+            self.mesh.prepare(enc, state or {}, timer)
         n_r = len(self.recs_r)
-        clear = tuple(x / 255.0 for x in self.params.clear_rgb) + (1.0,)
+        clear_rgb = self.params.clear_rgb if clear_rgb is None else clear_rgb
+        clear = tuple(x / 255.0 for x in clear_rgb) + (1.0,)
         slot = UNIFORM_SLOT
         for b, (c0, nb) in enumerate(self.batches):
             # cull, compact and sort every camera of the batch (workgroup_id.z = camera)
@@ -1082,12 +1099,10 @@ class SplatRenderer:
                     },
                     timestamp_writes=timer.writes("draw") if timer else None,
                 )
-                if self.meshes is not None and self.n_mesh_index:
-                    rp.set_pipeline(self.p_mesh)
-                    rp.set_bind_group(0, self.bg_mesh, [self.d_cam[ci, 0, 0] * slot])
-                    rp.set_vertex_buffer(0, self.b_mesh_vtx)
-                    rp.set_index_buffer(self.b_mesh_idx, "uint32")
-                    rp.draw_indexed(self.n_mesh_index)
+                if meshes:
+                    self.mesh.draw(
+                        rp, self.d_cam[ci, 0, 0] * slot, self.color_format, camera=cams[ci]
+                    )
                 self._draw_splats(rp, ci, s)
                 rp.end()
                 if self.resolves:
@@ -1189,14 +1204,309 @@ class SplatRenderer:
         tot = sum(b.size for b in self._buffers + self._cam_buffers)
         per_px = COLOR_FORMATS[self.color_format] + 4 + (4 if self.resolves else 0)
         tot += sum(per_px * w * h for w, h in self.sizes)  # colour, depth32float, 8-bit resolve
+        if self.mesh is not None:
+            tot += self.mesh.gpu_bytes()  # textures: maps, environment, shadow map
         return tot
 
     def live_resources(self) -> int:
         """Buffers and textures held (diagnostic: constant across camera resizes)."""
         return len(self._buffers) + len(self._cam_buffers) + len(self._cam_textures)
 
+    # ------------------------------------------------------- environment
+    def bake_faces(
+        self, center, *, size: int = BAKE_SIZE, render_size=None, max_pixel_radius=None
+    ) -> np.ndarray:
+        """The capture page's environment bake (sceneEnvironment.ts): the splats
+        seen from ``center`` on the six 90-degree faces of a size^2 cube, colours
+        decoded to linear (Spark's encodeLinear) and blended in 8 bits over the
+        page's clear colour as a linear render target stores it, no meshes.
+        render_size: Spark's renderSize for the splat sizes (None: the face);
+        max_pixel_radius: the bake renderer's cap (None: this renderer's).
+        Returns (6, size, size, 4) uint8 faces in three's read-back order (GL
+        cube faces +x -x +y -y +z -z, row 0 at t = -1). The renderer's next
+        render() goes back to its own cameras and cap."""
+        cams = bake_cameras(center, size)
+        if render_size is not None:
+            for c in cams:
+                c["spark_render_size"] = [int(render_size[0]), int(render_size[1])]
+        self._set_encode_linear(1)
+        if max_pixel_radius is not None:
+            self._set_max_pixel_radius(float(max_pixel_radius))
+        try:
+            imgs = self.render_cameras(cams, None, draw_meshes=False, clear_rgb=(1, 1, 1))
+        finally:
+            self._set_encode_linear(0)
+            if max_pixel_radius is not None:
+                self._set_max_pixel_radius(self.params.max_pixel_radius)
+        faces = np.stack([im[::-1] for im in imgs])
+        alpha = np.full(faces.shape[:3] + (1,), 255, np.uint8)
+        return np.concatenate([faces, alpha], -1)
+
+    def _set_encode_linear(self, on: int) -> None:
+        self.device.queue.write_buffer(self.b_params, 14 * 4, np.array([on], np.uint32))
+
+    def _set_max_pixel_radius(self, px: float) -> None:
+        self.device.queue.write_buffer(self.b_params, 5 * 4, np.array([px], np.float32))
+
+    def prefilter_cube(self, faces: np.ndarray):
+        """PMREM of a cube given as (6, s, s, 4) uint8 faces in read-back order,
+        mipmapped as generateMipmap does: (atlas texture, width, height, max_mip)."""
+        tex, view = upload_texture(self.device, cube_mips(faces), "rgba8unorm", layers=6, cube=True)
+        try:
+            return self.mesh.prefilter.run("cube", view, cube_size=faces.shape[1])
+        finally:
+            tex.destroy()
+
+    def prefilter_equirect(self, rgb: np.ndarray):
+        """PMREM of an equirectangular HDR image ((H, W, 3) float32, rows top to
+        bottom, as RGBELoader / EXRLoader decode it): uploaded as half floats the
+        way those loaders convert them (HalfFloatType), with three's flipY (row 0
+        at v = 1)."""
+        h, w = rgb.shape[:2]
+        rgba = np.concatenate([np.asarray(rgb, np.float32), np.ones((h, w, 1), np.float32)], -1)
+        tex, view = upload_texture(
+            self.device, [np.ascontiguousarray(half_float_like_three(rgba[::-1]))], "rgba16float"
+        )
+        try:
+            return self.mesh.prefilter.run("equirect", view, cube_size=w // 4)
+        finally:
+            tex.destroy()
+
+    def prefilter_studio(self):
+        """three's RoomEnvironment through PMREMGenerator.fromScene(room, 0.04)."""
+        return self.mesh.prefilter.run("room", None, cube_size=STUDIO_SIZE, pre_blur=STUDIO_SIGMA)
+
+    def set_lighting(self, lighting: Lighting) -> None:
+        """Light the meshes with this (the environment texture is replaced)."""
+        self.lighting = lighting
+        if self.mesh is None:
+            return
+        self.mesh.set_lighting(lighting)
+        self.mesh.bind_frame(self.b_disp, UNIFORM_SLOT)
+        # the budget follows the new environment, and so do the camera sets planned later
+        bufs, parts = mesh_budget(self.meshes, lighting, self.shadow_params)
+        self._mesh_kw = {"mesh_buffers": bufs, "mesh_parts": parts}
+        self.budget = self._plan(self.sizes, sort_batch=self.batch)
+
     def close(self) -> None:
         self._release_cameras()
+        if self.mesh is not None:
+            self.mesh.destroy()
+            self.mesh = None
         for b in self._buffers:
             b.destroy()
         self._buffers = []
+
+
+def _no_splats() -> Splats:
+    """One fully transparent splat: the splat pass of a scene without a 3DGS
+    background draws nothing (min_alpha culls it)."""
+    return Splats(
+        np.zeros((1, 3), np.float32),
+        np.full((1, 3), 1e-3, np.float32),
+        np.array([[1.0, 0.0, 0.0, 0.0]], np.float32),
+        np.zeros(1, np.float32),
+        np.zeros((1, 1, 3), np.float32),
+    )
+
+
+class WgslRenderer:
+    """D's rendering of a client-render session, the way the capture page does
+    it (frontend/src/sceneRenderer.ts): from the session's scene_init and its
+    asset bytes to ``render(state) -> {camera: (H, W, 3) uint8}``.
+
+    fetch(url) returns the bytes (or a file path) of a scene_init URL: the
+    splat PLY, the objects' WEM1 (``meshes[].wem``), the robot links' WEL1, the
+    lighting asset or HDRI. Lighting, in the capture page's order: a lighting
+    asset (``scene_init.lighting``) when there is one; else an HDRI
+    (``scene_init.hdri``); else the bake at ``scene_init.probe_center`` (at
+    PROBE_HEIGHT above the origin when absent), falling back to the studio set-up
+    when the probe is black or dark, or when there is no splat. ``info`` says
+    which (for ``info["render"]``).
+
+    shadows: the key light's shadow map (the editor's quality tier; the capture
+    page has none). bake_render_size, bake_max_pixel_radius: Spark's renderSize
+    and cap in the page's bake (lighting.BAKE_RENDER_SIZE explains them).
+    glb_to_wem1: converts a mesh URL that has no WEM1 (benches with recorded
+    traces; the engine compiles WEM1 itself). strict: a part of the scene this
+    host would leave out or light otherwise than the capture page (a GLB
+    without its WEM1, a robot link it cannot fetch, an HDRI or lighting asset
+    it cannot read) raises ValueError instead of a RuntimeWarning
+    (world-engine-client: the browser path then draws the scene). The other
+    options go to SplatRenderer (color_format, wgsl_dir, memory_limit, ...).
+
+    fetch may return bytes, a bytearray, a memoryview (world-engine-client's
+    assets decrypted in memory; the splat PLY is read from it without a copy)
+    or a path."""
+
+    def __init__(
+        self,
+        scene_init: dict,
+        fetch,
+        *,
+        adapter="auto",
+        device=None,
+        shadows: ShadowParams | bool | None = True,
+        lighting: Lighting | None = None,
+        bake_render_size=BAKE_RENDER_SIZE,
+        bake_max_pixel_radius=BAKE_MAX_PIXEL_RADIUS,
+        glb_to_wem1=None,
+        max_sh_degree: int = 3,
+        strict: bool = False,
+        **renderer_kw,
+    ):
+        def get(url):
+            data = fetch(url)
+            if isinstance(data, (str, Path)):
+                return Path(data).read_bytes()
+            if isinstance(data, memoryview):  # the readers below slice and decode bytes
+                return data.tobytes()
+            return data
+
+        self.scene_init = scene_init
+        self.strict = strict
+        self.info: dict = {"pipeline": PIPELINE}
+        self.baked_faces: np.ndarray | None = None
+        sp = scene_init.get("splat") or {}
+        self.has_splat = bool(sp.get("url"))
+        if self.has_splat:
+            data = fetch(sp["url"])
+            splats = read_splat_ply_any(data, max_sh_degree)
+            del data  # the plaintext: the splats are parsed out of it
+            splats = splats.placed(
+                sp.get("pos", (0, 0, 0)), sp.get("quat", (0, 0, 0, 1)), sp.get("scale", 1.0)
+            )
+        else:
+            splats = _no_splats()
+        self.meshes = MeshScene.from_scene_init(
+            scene_init, get, glb_to_wem1=glb_to_wem1, strict=strict
+        )
+        for w in self.meshes.warnings:
+            warnings.warn(w, RuntimeWarning, stacklevel=2)
+        self.renderer = SplatRenderer(
+            splats,
+            scene_init["cameras"],
+            meshes=self.meshes,
+            lighting=Lighting.uniform(1.0),
+            shadows=shadows,
+            adapter=adapter,
+            device=device,
+            **renderer_kw,
+        )
+        t0 = time.perf_counter()
+        self._bake_args = {
+            "render_size": bake_render_size,
+            "max_pixel_radius": bake_max_pixel_radius,
+        }
+        del splats
+        try:
+            light = lighting or self._lighting(scene_init, get)
+            self.renderer.set_lighting(light)
+        except BaseException:
+            self.renderer.close()
+            raise
+        self.lighting = light
+        self.info["lighting"] = light.mode
+        self.info["lighting_detail"] = dict(light.info)
+        self.info["lighting_s"] = round(time.perf_counter() - t0, 3)
+
+    def _lighting(self, si: dict, get) -> Lighting:
+        r = self.renderer
+        if si.get("lighting") and si["lighting"].get("url"):
+            try:
+                return read_weli1(get(si["lighting"]["url"]))
+            except Exception as e:  # pragma: no cover - a broken asset falls back
+                if self.strict:
+                    raise ValueError(f"the scene's lighting asset is not read: {e}") from e
+                warnings.warn(f"lighting asset not used ({e}); baking instead", RuntimeWarning, 3)
+        hdri = si.get("hdri")
+        if hdri and hdri.get("url"):
+            try:
+                atlas = r.prefilter_equirect(read_hdri(get(hdri["url"])))
+                return Lighting(
+                    "hdri",
+                    env_intensity=float(hdri.get("strength", 1.0)),
+                    env_rotation=ENV_ROTATION_ZUP,
+                    source=atlas,
+                    info={"hdri": hdri["url"]},
+                )
+            except Exception as e:
+                if self.strict:
+                    raise ValueError(f"the scene's HDRI is not read: {e}") from e
+                warnings.warn(f"HDRI not used ({e}); keeping the default lights", RuntimeWarning, 3)
+                self.info["hdri_error"] = str(e)
+        if self.has_splat:
+            pc = si.get("probe_center")
+            center = (
+                [float(v) for v in pc]
+                if pc is not None and len(pc) >= 3
+                else [0.0, 0.0, PROBE_HEIGHT]
+            )
+            t0 = time.perf_counter()
+            faces = r.bake_faces(center, **self._bake_args)
+            self.baked_faces = faces  # the read-back faces (tests and the bench)
+            probe = dominant_light_direction(faces)
+            info = {"center": center, "bake_ms": round((time.perf_counter() - t0) * 1e3, 1)}
+            if probe is not None:
+                info["probe"] = probe_report(probe)
+                if abs(info["probe"]["margin"]) < PROBE_MARGIN_WARN:
+                    warnings.warn(
+                        f"the light probe's mean luminance {probe.mean:.4f} is within "
+                        f"{PROBE_MARGIN_WARN:.0%} of the {SCENE_ENV_MIN_MEAN} threshold between "
+                        "the scene bake and the studio lights; another adapter (8-bit blending "
+                        "rounds differently, the CPU adapters most) can light this scene the "
+                        "other way",
+                        RuntimeWarning,
+                        3,
+                    )
+            if probe is None:
+                info["failed"] = "black"
+            elif probe.mean < SCENE_ENV_MIN_MEAN:
+                info["failed"] = "dark"
+                info["mean"] = probe.mean
+            else:
+                atlas = r.prefilter_cube(faces)
+                return Lighting(
+                    "scene",
+                    env_intensity=scene_intensity(probe.mean),
+                    env_rotation=(0.0, 0.0, 0.0),
+                    key_dir=tuple(probe.dir.tolist()),
+                    key_intensity=SCENE_KEY_INTENSITY,
+                    source=atlas,
+                    info=info,
+                )
+            self.info["bake"] = info
+        return Lighting(
+            "studio",
+            env_intensity=STUDIO_ENV_INTENSITY,
+            env_rotation=ENV_ROTATION_ZUP,
+            key_dir=STUDIO_KEY_DIR,
+            key_intensity=STUDIO_KEY_INTENSITY,
+            source=r.prefilter_studio(),
+        )
+
+    def render(self, state: dict) -> dict[str, np.ndarray]:
+        """A render_state -> {camera name: (H, W, 3) uint8}: its cameras, or
+        the scene_init's when it names none."""
+        if not state.get("cameras"):
+            state = {**state, "cameras": self.scene_init["cameras"]}
+        return self.renderer.render(state)
+
+    @property
+    def color_format(self) -> str:
+        return self.renderer.color_format
+
+    @property
+    def last_timing(self) -> dict:
+        return self.renderer.last_timing
+
+    def close(self) -> None:
+        self.renderer.close()
+
+
+def read_splat_ply_any(data, max_sh_degree: int = 3) -> Splats:
+    from .splat_data import read_splat_ply
+
+    return read_splat_ply(
+        data if isinstance(data, (bytes, bytearray, memoryview)) else Path(data), max_sh_degree
+    )

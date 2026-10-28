@@ -6,7 +6,8 @@
 // and vertex_index % 4 the corner. Records are back-to-front; blending is
 // premultiplied "over", depth-tested against the mesh pass, no depth write.
 // Colours go to an rgba8unorm target as they are: Spark's splat colours skip
-// tone mapping and blend in display (sRGB-encoded) values.
+// tone mapping and blend in display (sRGB-encoded) values. The environment
+// bake sets Params.encode_linear and blends decoded values (Spark encodeLinear).
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<uniform> cams: array<Camera, MAX_CAMS>;
@@ -58,5 +59,9 @@ fn fs_splat(in: VOut) -> @location(0) vec4f {
   if (a < P.min_alpha) {
     discard;
   }
-  return vec4f(in.color.rgb * a, a);
+  var rgb = in.color.rgb;
+  if (P.encode_linear != 0u) {
+    rgb = pow(rgb, vec3f(2.2));  // Spark's srgbToLinear (the environment bake's encodeLinear)
+  }
+  return vec4f(rgb * a, a);
 }

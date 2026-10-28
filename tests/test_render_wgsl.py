@@ -98,11 +98,25 @@ def test_a_platform_session_keeps_only_ciphertext_on_disk(stub, d):
         root = cache_root()
         assert plaintext_files(root, tempfile.gettempdir()) == []
         blobs = [p.read_bytes() for p in (root / "blobs").rglob("*") if p.is_file()]
-        for url in ("/__asset/0.ply", "/__asset/1.glb"):
+        for url in ("/__asset/0.ply", "/__asset/1.wem1"):
             assert platform.cipher(url) in blobs, f"{url} is stored as the platform sent it"
     finally:
         env.close()
     assert plaintext_files(cache_root(), tempfile.gettempdir()) == []
+
+
+def test_the_meshes_are_lit_and_shaded_as_the_capture_page_draws_them(stub, d):
+    """wgsl/1 draws M-D2's meshes: the scene's own lighting baked at its light
+    probe (the golden splats light the box), three's MeshStandardMaterial."""
+    DPlatform(stub, encrypted=False)
+    env = connect(stub, platform=False)
+    try:
+        obs, info = env.reset(seed=0)
+        assert info["render"]["lighting"] in ("scene", "studio")
+        lit = env.renderer._scene.info
+        assert lit["pipeline"] == "wgsl/1" and lit["lighting"] == info["render"]["lighting"]
+    finally:
+        env.close()
 
 
 def test_images_follow_the_state_and_repeat_exactly(stub, d):

@@ -1,11 +1,13 @@
 {
   "pipeline": "wgsl/1",
-  "comment": "D's splat pipeline (design doc 16 §9). A module is the concatenation of its files, in order. Hosts load these files as they are; see README.md for bindings and dispatch order.",
+  "comment": "D's pipeline (design doc 16 §9): splats and meshes. A module is the concatenation of its files, in order. Hosts load these files as they are; see README.md for bindings and dispatch order.",
   "modules": {
     "preprocess": ["common.wgsl", "preprocess.wgsl"],
     "sort": ["common.wgsl", "sort.wgsl"],
     "splat": ["common.wgsl", "splat.wgsl"],
-    "mesh_flat": ["common.wgsl", "mesh_flat.wgsl"],
+    "mesh": ["common.wgsl", "cubeuv.wgsl", "material.wgsl", "mesh.wgsl"],
+    "shadow": ["material.wgsl", "shadow.wgsl"],
+    "pmrem": ["cubeuv.wgsl", "pmrem.wgsl"],
     "resolve": ["resolve.wgsl"]
   },
   "constants": {
@@ -15,6 +17,10 @@
     "MAX_REC_CHUNKS": 16,
     "ST_WORDS": 200,
     "REC_BYTES": 32,
-    "GEOM_VEC4_PER_SPLAT": 3
+    "GEOM_VEC4_PER_SPLAT": 3,
+    "VERTEX_BYTES": 80,
+    "OWNER_BYTES": 128,
+    "MATERIAL_SLOT": 512,
+    "FRAME_BYTES": 256
   }
 }
