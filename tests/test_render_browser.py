@@ -7,9 +7,11 @@ is PageSim (test_render.py), its installer a stand-in."""
 
 import hashlib
 import io
+import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -40,10 +42,29 @@ SHELL_LAYOUTS = {
 }
 
 
+_OWN = {"root": None}  # this test's tmp_path: the only place these tests write
+
+
+@pytest.fixture(autouse=True)
+def own_directories(tmp_path, monkeypatch):
+    """Every test here writes under its tmp_path only, even when the code
+    under test goes wrong: Playwright's own browsers directory points into it
+    and must stay empty, and the stand-in installers refuse any other place
+    (a user's ~/.cache/ms-playwright got a fake shell that way once)."""
+    _OWN["root"] = tmp_path
+    playwright_own = tmp_path / "playwright-own"
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(playwright_own))
+    yield
+    assert not playwright_own.exists(), "something wrote into Playwright's own directory"
+
+
 def make_shell(
     root: Path, rev: str = REV, layout: tuple[str, str] = SHELL_LAYOUTS["linux-x64"]
 ) -> Path:
     """What Playwright leaves in ``root`` once the headless shell is in."""
+    assert Path(root).resolve().is_relative_to(_OWN["root"].resolve()), (
+        f"a stand-in of Playwright's installer was told to write into {root}"
+    )
     build = root / f"chromium_headless_shell-{rev}"
     exe = build / layout[0] / layout[1]
     exe.parent.mkdir(parents=True, exist_ok=True)
@@ -302,12 +323,28 @@ from pathlib import Path
 print("Chrome Headless Shell 148.0.7778.96 downloaded |######| 100% of 113.2 MiB", flush=True)
 print("a line on stderr", file=sys.stderr, flush=True)
 assert sys.argv[1:] == ["install", "--only-shell", "chromium"], sys.argv
-build = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]) / "chromium_headless_shell-4242"
+root = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]).resolve()
+if not root.is_relative_to(Path(os.environ["FAKE_ROOT"]).resolve()):
+    sys.exit(f"stand-in installer: {root} is not the test's own directory")
+build = root / "chromium_headless_shell-4242"
 exe = build / "chrome-headless-shell-linux64" / "chrome-headless-shell"
 exe.parent.mkdir(parents=True)
 exe.write_text("")
 (build / "INSTALLATION_COMPLETE").write_text("")
 """
+
+
+def fake_playwright(tmp_path: Path) -> Path:
+    """A stand-in playwright package: its installer (FAKE_INSTALLER) and a
+    browsers.json that names build 4242. Returns the directory to put on
+    PYTHONPATH."""
+    fake = tmp_path / "fake-playwright" / "playwright"
+    (fake / "driver" / "package").mkdir(parents=True)
+    (fake / "__init__.py").write_text("")
+    (fake / "__main__.py").write_text(FAKE_INSTALLER)
+    listing = {"browsers": [{"name": "chromium-headless-shell", "revision": REV}]}
+    (fake / "driver" / "package" / "browsers.json").write_text(json.dumps(listing))
+    return fake.parent
 
 
 def test_the_download_prints_nothing_on_the_terminal(
@@ -316,11 +353,8 @@ def test_the_download_prints_nothing_on_the_terminal(
     """A real installer process (a stand-in playwright on PYTHONPATH that
     writes to both of its streams): nothing reaches this process's stdout or
     stderr; the download and the installer's output are in the log."""
-    fake = tmp_path / "fake-playwright" / "playwright"
-    fake.mkdir(parents=True)
-    (fake / "__init__.py").write_text("")
-    (fake / "__main__.py").write_text(FAKE_INSTALLER)
-    monkeypatch.setenv("PYTHONPATH", str(fake.parent))
+    monkeypatch.setenv("PYTHONPATH", str(fake_playwright(tmp_path)))
+    monkeypatch.setenv("FAKE_ROOT", str(tmp_path))
     caplog.set_level(logging.DEBUG, logger="world_engine_client.render")
     capfd.readouterr()
     exe = render_module.install_chromium()
@@ -331,6 +365,23 @@ def test_the_download_prints_nothing_on_the_terminal(
     assert any("downloading the headless browser" in m for m in logged), logged
     assert any("100% of 113.2 MiB" in m for m in logged), "the installer's output is logged"
     assert any("a line on stderr" in m for m in logged), logged
+
+
+def test_a_script_that_configures_no_logging_sees_nothing_either(shell_dir, tmp_path):
+    """The download in a plain process, as a user's script runs it: Python
+    prints log records of WARNING and above to stderr when nothing handles
+    them, which pytest's own log capture hides above."""
+    package = Path(wec.__file__).resolve().parents[1]
+    env = {**os.environ, "FAKE_ROOT": str(tmp_path)}
+    env["PYTHONPATH"] = os.pathsep.join([str(fake_playwright(tmp_path)), str(package)])
+    env["DIGIARENA_BROWSERS_DIR"] = str(shell_dir)
+    code = "from world_engine_client import render\nrender.install_chromium()\n"
+    done = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr
+    assert (done.stdout, done.stderr) == ("", ""), "nothing on the terminal"
+    assert (shell_dir / f"chromium_headless_shell-{REV}" / "INSTALLATION_COMPLETE").is_file()
 
 
 # --------------------------------------------------------------- when it fails
