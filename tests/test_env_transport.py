@@ -349,6 +349,31 @@ def test_proto2_has_no_heartbeat_or_episode_binding(stub):
     env.close()
 
 
+@pytest.mark.parametrize("call", ["step", "reset", "observe"])
+def test_a_connection_the_server_closed_while_idle_is_opened_again(stub, call):
+    """Servers close keep-alive connections that stay idle (Node after 5 s).
+    The next request went out on the dead socket: a step or reset then raised
+    RecoveryRequiredError though it never reached the server. A renderer
+    start of more than 5 s did this to the first reset. Now a connection the
+    server has closed is opened again before anything is sent."""
+    import time
+
+    stub.handler_class.timeout = 0.3  # the server drops connections idle this long
+    remote = wec.connect("secret", url=stub.url, timeout=5)
+    try:
+        remote.reset(seed=0)
+        time.sleep(0.8)
+        if call == "step":
+            remote.step([0, 0, 0, 0])
+        elif call == "reset":
+            remote.reset(seed=1)
+        else:
+            remote.observe()
+        assert stub.paths()[-1] == f"/control/{call}"
+    finally:
+        remote.close()
+
+
 def test_close_survives_a_dead_server(stub):
     env = wec.connect("secret", url=stub.url)
     stub.responders["/control/release"] = lambda body: DROP

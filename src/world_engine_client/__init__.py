@@ -25,12 +25,12 @@ from .errors import (
     ProtocolError,
     RecordingPendingError,
     RecoveryRequiredError,
+    RendererError,
     ResetRequiredError,
     TeleopActiveError,
     TokenError,
     WorldEngineClientError,
 )
-from .render import RendererError
 from .rotations import (
     axisangle_to_matrix,
     matrix_to_axisangle,

@@ -76,6 +76,9 @@ browser tab is open, and the images never travel over the network. This needs th
 pip install 'world-engine-client[render]'
 ```
 
+The extra includes `cryptography`, which reads the platform's encrypted scene
+assets. A session with a local `world-engine serve` works without it.
+
 An installed Google Chrome is used if there is one. Otherwise the first session
 downloads Playwright's Chromium (about 300 MB, once, with progress in the
 terminal). Set `WE_RENDER_AUTO_INSTALL=0` or pass
@@ -84,11 +87,79 @@ terminal). Set `WE_RENDER_AUTO_INSTALL=0` or pass
 Chromium may also need its system libraries:
 `python -m playwright install --with-deps chromium` (needs sudo).
 
-Scene assets are fetched once per session and cached by content hash in a
-temporary directory that `close()` deletes; pass
-`render_options={"cache_dir": "..."}` to keep them across sessions. The
-`WE_RENDER_CHROME_ARGS` environment variable overrides Chrome's flags.
+The `WE_RENDER_CHROME_ARGS` environment variable overrides Chrome's flags.
 `env.last_timings` splits each step into server, transport and render time.
+
+Chrome reads the page and the scene from a loopback HTTP server in this
+process and sends its images back over a loopback WebSocket. Other processes
+on the machine can reach both ports, so both need a random token of this
+session: Playwright adds it to every request the page makes, and the
+WebSocket URL the page gets ends in it. Requests and connections without it
+get 403. Without the token, another local process cannot read the scene or
+put its own images into your observations. For the page, the loopback server
+fetches only the page and the files of its build from the server.
+
+### The render cache
+
+The client downloads the scene's assets and the capture page's scripts
+before Chrome starts and keeps them in the render cache, so the next session
+of the same scene downloads nothing.
+The cache is `<user cache dir>/digiarena/render/`: `$XDG_CACHE_HOME` or
+`~/.cache` on Linux, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows.
+`DIGIARENA_CACHE_DIR` or `render_options={"cache_dir": "..."}` moves it.
+Its directories are 0700 and its files 0600. `close()` no longer deletes
+anything.
+
+The DigiArena platform sends scene assets encrypted (DAC1: AES-256-GCM under
+a key for your account and that scene). The client stores them as they
+arrive and asks the platform for the key at every connect; the key stays in
+memory. So the scene's files are never in the clear on disk, and its cache
+stops working the moment you lose access: the scene made private, your key
+revoked, or a new key epoch on the platform. The robot meshes (public MuJoCo
+Menagerie geometry) and the capture page's scripts are kept plain. A local
+`world-engine serve` sends your own scene as it is, and the cache keeps it
+plain.
+
+What the encryption does: it keeps the scene from someone who can read your
+disk but cannot sign in as you. It does not keep it from you. Your key
+decrypts it, and while a session runs the decrypted assets and the images
+are in the memory of this process, of Chrome and of the GPU.
+
+Each file is checked when a session uses it, and a damaged or changed file
+is downloaded again. Processes that share the cache download a file once. A
+process that dies during a download does not hold up the others. A broken
+download resumes where it stopped; one that sends nothing for 60 seconds
+fails. Downloads do not count against the renderer's start time.
+
+A file not used for 30 days is deleted unless its scene is pinned. The check
+runs in the background when a renderer starts, at most once a day, after the
+session's own files are in place: the scene you open is not deleted, however
+long it went unused. A machine that no longer starts renderers keeps its files
+until you clear them.
+
+```python
+from world_engine_client import cache
+
+cache.list()                     # [{scene, scope, size, last_used, pinned, ...}]
+cache.pin("alice/kitchen_001")   # keep a scene however long it goes unused
+cache.unpin("alice/kitchen_001")
+cache.clear("alice/kitchen_001") # or clear() for everything
+cache.configure(max_age_days=30, max_size_gb=None)  # 0 days: keep everything
+```
+
+From a shell: `python -m world_engine_client.cache ls`, `pin <scene>`,
+`unpin <scene>`, `clear <scene>` or `clear --all`, and `config
+--max-age-days N --max-size-gb N`. `--dir PATH` picks another cache.
+`DIGIARENA_CACHE_MAX_AGE_DAYS` and `DIGIARENA_CACHE_MAX_SIZE_GB` override the
+stored settings. The DigiArena SDK has the same as `da.cache` and
+`digiarena cache`.
+
+Clients before 0.6 kept plain copies of scene assets in `cache_dir` and in
+`we_render_*` temporary directories. This client does not read them. It
+deletes `we_render_*` directories that nobody has used for a day, and
+`python -m world_engine_client.cache --dir <old cache_dir> clear --legacy`
+deletes the rest, except directories used in the last hour: an old client may
+still be loading from one. `clear --all --legacy` clears the cache as well.
 
 Without a hardware GPU, the images are rendered in software (SwiftShader) and
 a `RuntimeWarning` says so before the first frame. Expect seconds per step: with
