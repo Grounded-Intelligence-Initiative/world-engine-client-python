@@ -506,6 +506,9 @@ def test_a_scene_d_cannot_read_is_drawn_by_the_browser_path(stub, chrome, monkey
         if REQUIRED:
             pytest.fail(f"WE_TEST_REQUIRE_WGSL=1 but no adapter renders: {exc}")
         pytest.skip(f"no adapter renders here: {exc}")
+    # renderer D starts here whatever the adapter (on a CPU adapter the client
+    # would first try Chrome on the GPU: tested below)
+    monkeypatch.setattr(render_wgsl, "chrome_may_be_faster", lambda *a, **k: False)
     monkeypatch.setitem(d_scene.ASSETS, "/__asset/0.ply", compressed_ply())
     platform = DPlatform(stub, encrypted=False)
     with warnings.catch_warnings(record=True) as log:
@@ -518,6 +521,73 @@ def test_a_scene_d_cannot_read_is_drawn_by_the_browser_path(stub, chrome, monkey
         assert any("headless Chrome instead" in t and "chunk" in t for t in texts), texts
         _, info = env.reset(seed=0)
         assert info["render"]["renderer"] == "chrome" and "chunk" in info["render"]["reason"]
+    finally:
+        env.close()
+
+
+def _d_opens():
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            render_wgsl.open_adapter(cache_dir=Path(tempfile.gettempdir()) / "probe")
+    except render_wgsl.NoRenderAdapter as exc:
+        if REQUIRED:
+            pytest.fail(f"WE_TEST_REQUIRE_WGSL=1 but no adapter renders: {exc}")
+        pytest.skip(f"no adapter renders here: {exc}")
+
+
+def _wem1_without(key: str) -> bytes:
+    """The test box's WEM1 with a field of its JSON record left out."""
+    import json as _json
+    import struct
+
+    import d_scene
+
+    data = d_scene.box_wem1()
+    _, jn, bn = struct.unpack("<III", data[4:16])
+    doc = _json.loads(data[16 : 16 + jn])
+    doc.pop(key)
+    js = _json.dumps(doc).encode()
+    js += b" " * (-len(js) % 4)
+    return b"WEM1" + struct.pack("<III", 1, len(js), bn) + js + data[16 + jn :]
+
+
+@pytest.mark.parametrize(
+    "change, why",
+    [
+        ("no wem", "no WEM1"),  # an engine that sent protocol 2 without the object's WEM1
+        ("broken wem", "primitives"),  # a WEM1 record without its primitives
+    ],
+)
+def test_a_mesh_d_cannot_draw_is_drawn_by_the_browser_path(stub, chrome, monkeypatch, change, why):
+    """Renderer D leaves no object out: an object it cannot draw makes the
+    scene the browser path's, with a warning that says why."""
+    import d_scene
+
+    _d_opens()
+    # renderer D starts here whatever the adapter (on a CPU adapter the client
+    # would first try Chrome on the GPU: tested below)
+    monkeypatch.setattr(render_wgsl, "chrome_may_be_faster", lambda *a, **k: False)
+    if change == "broken wem":
+        monkeypatch.setitem(d_scene.ASSETS, "/__asset/1.wem1", _wem1_without("primitives"))
+    platform = DPlatform(stub, encrypted=False)
+    if change == "no wem":
+        base = platform.scene_init
+
+        def without_wem():
+            si = base()
+            si["meshes"] = [{k: v for k, v in m.items() if k != "wem"} for m in si["meshes"]]
+            return si
+
+        platform.scene_init = without_wem
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        env = wec.connect("secret", url=stub.url, images=True)
+    try:
+        assert platform.offers[0]["render_protocols"] == [1, 2]
+        assert isinstance(env.renderer, FakeChrome)
+        texts = [str(w.message) for w in log if issubclass(w.category, RuntimeWarning)]
+        assert any("headless Chrome instead" in t and why in t for t in texts), texts
     finally:
         env.close()
 
