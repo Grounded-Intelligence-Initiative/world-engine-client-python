@@ -377,11 +377,14 @@ _SRGB_TABLE = srgb_to_linear(np.arange(256) / 255.0).astype(np.float32)
 # vertices and the GLB's own lights, which WEM1 leaves out or keeps unposed; it
 # fails to load a GLB with compressed geometry (no decoder on the page) or a
 # texture without a PNG, JPEG, WebP or AVIF source, where this host draws the
-# rest; an external image file is the page's to fetch. A strict host refuses
-# such a WEM1. What the record lists besides (a material extension drawn as
-# MeshStandardMaterial, a map on TEXCOORD_2 or 3, a camera) is drawn close to
-# the page and only warns. The engine's serving/render_protocol.py restates this
-# set (tests/test_render_protocol.py holds the two to the same strings).
+# rest. A strict host refuses such a WEM1. What the record lists besides is
+# drawn close to the page and only warns: a material extension drawn as
+# MeshStandardMaterial, a map on TEXCOORD_2 or 3, a camera, and an external
+# image file: the asset routes serve the scene's files only, so the page goes
+# without that map as this host does (Kenney's kits reference one; so do 244 of
+# 680 third-party GLBs measured). The engine's serving/render_protocol.py
+# restates this set (tests/test_render_protocol.py holds the two to the same
+# strings).
 UNDRAWN = frozenset(
     {
         "EXT_mesh_gpu_instancing",
@@ -392,7 +395,6 @@ UNDRAWN = frozenset(
         "KHR_draco_mesh_compression (primitive not drawn)",
         "EXT_meshopt_compression (primitive not drawn)",
         "texture without a PNG/JPEG/WebP/AVIF source (KTX2?)",
-        "external image file",
     }
 )
 

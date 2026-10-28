@@ -1,7 +1,7 @@
 {
   "comment": "Copied by scripts/sync_wgsl.py from the engine repository; change these files there, not here.",
   "pipeline": "wgsl/1",
-  "engine_commit": "ca8d7b1023b7c01e34b8f67474ee8e562fed9e3d",
+  "engine_commit": "63dfe3c7c84a21827b26ec28a2ba744f28973a1c",
   "files": {
     "README.md": {
       "source": "frontend/src/render/wgsl/README.md",
@@ -45,7 +45,7 @@
     },
     "mesh_data.py": {
       "source": "world_engine/renderer/wgsl/mesh_data.py",
-      "sha256": "f59d5749787be04c42fffb2ff20aae4ce12bf90a0b92f76f057733a8ef0804f7"
+      "sha256": "72ad87941215925ea91cb8aa95004f2646b6ab6aed3e80e52ec9453a6754acb7"
     },
     "mesh_pass.py": {
       "source": "world_engine/renderer/wgsl/mesh_pass.py",
