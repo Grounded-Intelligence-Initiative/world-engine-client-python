@@ -751,6 +751,8 @@ class LocalRenderer:
         raise RendererError(
             "no Chrome configuration rendered a frame: " + " | ".join(self._failures),
             code="renderer_unavailable",
+            # the headless shell's download failed on the way: how to fix that
+            fixes=list(self._shell_failure.fixes) if self._shell_failure else None,
         )
 
     async def _attempt(self, args: list[str], *, accept_software: bool):

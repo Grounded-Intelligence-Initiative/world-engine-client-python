@@ -291,6 +291,35 @@ def test_a_failed_download_is_tried_once_and_says_how_to_fix_it(sim, shell_dir, 
     assert len(calls) == 1, "one download for all flag sets"
 
 
+def test_a_failed_download_is_tried_once_where_chrome_is_there_but_fails(
+    sim, shell_dir, monkeypatch
+):
+    """Chrome is installed, so the start downloads nothing up front, but it
+    does not start with any flag set: the shell's download runs once, for the
+    first flag set, and its failure stands for the others."""
+    monkeypatch.setattr(render_module, "chrome_installed", lambda: True)
+    flag_sets = []
+
+    async def chrome_crashes(channel=None, args=(), executable_path=None, **kw):
+        flag_sets.append(list(args))
+        raise RuntimeError("Browser closed: the GPU process crashed")
+
+    monkeypatch.setattr(sim, "launch", chrome_crashes)
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=1, stdout=b"Error: connect ETIMEDOUT\n")
+
+    monkeypatch.setattr(render_module.subprocess, "run", run)
+    with pytest.raises(wec.RendererError) as caught:
+        start(sim, timeout=10, auto_install=True)
+    assert len(flag_sets) == len(render_module.candidate_args()) > 1, "every flag set was tried"
+    assert len(calls) == 1, "one download for the start"
+    assert "ETIMEDOUT" in str(caught.value)
+    assert render_module._SHELL_FIX in caught.value.fixes, "the error lists the download's fixes"
+
+
 def test_with_the_download_off_the_error_says_how_to_install(sim, downloads, monkeypatch):
     no_chrome(sim, monkeypatch)
     with pytest.raises(wec.RendererError) as caught:
