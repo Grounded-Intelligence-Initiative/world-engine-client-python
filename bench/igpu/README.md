@@ -100,7 +100,11 @@ keeps it).
 
 The bench prints the adapter of every run: renderer D's name, type
 (`IntegratedGPU`, `DiscreteGPU`, `CPU`) and backend; Chrome's WebGL renderer
-string. `summary.same_gpu` in the JSON compares the two.
+string. `summary.same_gpu` in the JSON compares the two by the device's name
+(the WebGL string's device, without "(R)", PCI ids and ANGLE's backend
+words), so an integrated and a discrete GPU of one vendor count as two; any
+CPU renderer on both sides (lavapipe, SwiftShader, WARP) counts as the one
+CPU. At the end the bench prints both names and whether they are the same.
 
 - Renderer D: `--adapter name:Intel` takes the adapter whose name contains
   "Intel"; `--adapter low-power` takes an integrated GPU before a discrete one.
@@ -148,6 +152,16 @@ adapter's precision, the driver); if it stays above the limit, that kind of
 adapter keeps the browser path as its default. For speed, that kind of adapter
 defaults to the faster path.
 
+`summary.verdict` (printed last) is `PASS` only when every planned run worked
+and all four checks were judged and passed, `FAIL` when a check failed, and
+`INCOMPLETE` otherwise, with `summary.incomplete_because` saying why: a run
+that failed (its error is in `runs`), a run that never ran, or a check that
+could not be judged. The speed check is judged only when both paths ran on
+the same GPU; on different GPUs their ratio says nothing about either, and
+the check says so. An `INCOMPLETE` result does not answer task book §8.1
+item 4 (b) for that machine: fix what it names and run again, or send it as
+it is. The exit status says whether the bench ran, not the verdict.
+
 ## The result file
 
 One JSON object:
@@ -171,7 +185,9 @@ One JSON object:
   (type, message, fixes, traceback) and `stderr_tail`.
 - `summary`: per path the median and range of steps/s, the quality numbers,
   whether the images were the same in every round, the adapters and warnings;
-  `d_over_chrome`, `same_gpu`, `checks` and `pass`.
+  `d_over_chrome`, `same_gpu`, `failed_runs`, `missing_runs`, `checks`,
+  `complete`, `incomplete_because`, `pass` (True, False or None) and
+  `verdict`.
 
 ## Numbers on the development machine
 

@@ -369,9 +369,10 @@ def test_the_checks_follow_the_readme():
         _record("chrome", 3, INTEL_CHROME, 11.0, 3.0, 2.7),
     ]
     s = run.summarize(runs)
-    assert s["pass"] is True and s["same_gpu"] == {
-        "d": ["intel"],
-        "chrome": ["intel"],
+    assert s["pass"] is True and s["complete"] is True and s["verdict"] == "PASS"
+    assert s["same_gpu"] == {
+        "d": ["intel uhd graphics"],
+        "chrome": ["intel uhd graphics"],
         "same": True,
     }
     assert s["d_over_chrome"] == {
@@ -399,29 +400,136 @@ def test_the_worst_run_decides_and_a_slower_d_fails():
     assert s["paths"]["d"]["quality"]["room200k"]["identical_across_runs"] is False
 
 
-def test_paths_on_different_gpus_are_flagged():
-    runs = [
-        _record("d", 1, INTEL_D, 40.0, 0.3, 1.8),
-        _record(
-            "chrome",
-            1,
-            "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 3060 Laptop GPU)",
-            30.0,
-            3,
-            2.7,
-        ),
+NVIDIA_D = "NVIDIA GeForce RTX 3060 Laptop GPU"
+NVIDIA_CHROME = (
+    "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 3060 Laptop GPU/PCIe/SSE2, OpenGL ES 3.2)"
+)
+
+
+def _failed(key, rnd):
+    path = "d" if key.startswith("d") else "chrome"
+    return {"key": key, "path": path, "round": rnd, "ok": False, "error": {"type": "X"}}
+
+
+def _rounds(key, adapter, rate, n=3):
+    return [
+        _record(key, r, adapter, rate, 0.3 if key == "d" else 3.0, 1.8) for r in range(1, n + 1)
     ]
-    s = run.summarize(runs)
-    assert s["same_gpu"]["same"] is False
-    speed = s["checks"][-1]
-    assert speed["same_gpu"] is False and "same GPU" in speed["name"]
+
+
+def test_paths_on_different_gpus_are_flagged_and_their_speed_not_judged():
+    """A laptop with an Intel and an NVIDIA GPU: renderer D on one, Chrome on
+    the other. Their ratio says nothing about either GPU, whichever is faster."""
+    for d, c, rate_d, rate_c in (
+        (NVIDIA_D, INTEL_CHROME, 60.0, 8.0),  # D on the discrete GPU: looked like a pass
+        (INTEL_D, NVIDIA_CHROME, 8.0, 12.0),  # D on the integrated GPU: looked like a fail
+    ):
+        s = run.summarize(_rounds("d", d, rate_d) + _rounds("chrome", c, rate_c))
+        speed = s["checks"][-1]
+        assert s["same_gpu"]["same"] is False and speed["same_gpu"] is False
+        assert speed["value"] == round(rate_d / rate_c, 3) and speed["pass"] is None
+        assert "different GPUs" in speed["name"] and "not judged" in speed["name"]
+        assert s["pass"] is None and s["complete"] is False and s["verdict"] == "INCOMPLETE"
 
 
 def test_a_failed_run_is_kept_with_its_error():
-    failed = {"key": "d", "path": "d", "round": 1, "ok": False, "error": {"type": "X"}}
-    s = run.summarize([failed])
+    s = run.summarize([_failed("d", 1)])
     assert (s["paths"]["d"]["runs"], s["paths"]["d"]["ok"]) == (1, 0)
-    assert all(c["pass"] is None for c in s["checks"]) and s["pass"] is True
+    assert all(c["pass"] is None for c in s["checks"])
+    assert s["pass"] is None and s["complete"] is False and s["failed_runs"] == ["d round 1"]
+
+
+def test_without_a_browser_path_run_the_speed_is_not_judged():
+    s = run.summarize(_rounds("d", INTEL_D, 40.0) + [_failed("chrome", r) for r in (1, 2, 3)])
+    assert [c["pass"] for c in s["checks"]] == [True, True, True, None]
+    assert s["pass"] is None and len(s["failed_runs"]) == 3
+    assert any("not judged" in why for why in s["incomplete_because"])
+
+
+def test_runs_that_failed_in_some_rounds_leave_the_result_incomplete():
+    runs = [_record("d", 1, INTEL_D, 40.0, 0.3, 1.8), _failed("d", 2), _failed("d", 3)]
+    s = run.summarize(runs + _rounds("chrome", INTEL_CHROME, 10.0))
+    assert [c["pass"] for c in s["checks"]] == [True, True, True, True]
+    assert s["pass"] is None and s["failed_runs"] == ["d round 2", "d round 3"]
+
+
+def test_planned_runs_that_never_ran_leave_the_result_incomplete():
+    runs = _rounds("d", INTEL_D, 40.0) + _rounds("chrome", INTEL_CHROME, 10.0)
+    planned = [(k, r) for r in (1, 2, 3) for k in ("d", "chrome")] + [("chrome_png", 0)]
+    s = run.summarize(runs, planned)
+    assert s["missing_runs"] == ["chrome_png round 0"] and s["pass"] is None
+    assert run.summarize(runs, planned[:-1])["pass"] is True
+
+
+def test_a_failed_check_fails_even_when_runs_are_missing():
+    runs = [_record("d", 1, INTEL_D, 40.0, 2.0, 1.8), _failed("chrome", 1)]
+    s = run.summarize(runs)
+    assert s["checks"][0]["pass"] is False and s["pass"] is False and s["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize(
+    "d, chrome, same",
+    [
+        (
+            "NVIDIA GeForce RTX 4090",
+            "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4090/PCIe/SSE2, OpenGL ES 3.2)",
+            True,
+        ),
+        (
+            "Intel(R) UHD Graphics (TGL GT1)",
+            "ANGLE (Intel, Mesa Intel(R) UHD Graphics (TGL GT1), OpenGL ES 3.2)",
+            True,
+        ),
+        (
+            "Intel(R) UHD Graphics",
+            "ANGLE (Intel, Intel(R) UHD Graphics (0x00009A60) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            True,
+        ),
+        (
+            "Intel(R) UHD Graphics (TGL GT1)",
+            "ANGLE (Intel, Vulkan 1.3.255 (Intel(R) UHD Graphics (TGL GT1) (0x00009A60)), "
+            "Intel open-source Mesa driver-23.2.1)",
+            True,
+        ),
+        (
+            "Apple M4 Pro",
+            "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
+            True,
+        ),
+        (
+            "AMD Radeon(TM) Graphics",
+            "ANGLE (AMD, AMD Radeon(TM) Graphics (0x00001638) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            True,
+        ),
+        (
+            "llvmpipe (LLVM 15.0.7, 256 bits)",
+            "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), "
+            "SwiftShader driver)",
+            True,
+        ),
+        (
+            "AMD Radeon(TM) Graphics",
+            "ANGLE (AMD, AMD Radeon RX 6800M (0x000073DF) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            False,
+        ),
+        (
+            "Intel(R) UHD Graphics",
+            "ANGLE (Intel, Intel(R) Arc(TM) A370M Graphics (0x00005693) Direct3D11 vs_5_0 "
+            "ps_5_0, D3D11)",
+            False,
+        ),
+        ("Intel(R) UHD Graphics", NVIDIA_CHROME, False),
+        ("llvmpipe (LLVM 15.0.7, 256 bits)", NVIDIA_CHROME, False),
+    ],
+)
+def test_the_two_paths_are_on_one_gpu_by_its_name(d, chrome, same):
+    """By the device's name, not its vendor: an AMD or Intel laptop can have
+    an integrated and a discrete GPU of one vendor. Any CPU renderer on both
+    sides is the one CPU."""
+    s = run.summarize(
+        [_record("d", 1, d, 40.0, 0.3, 1.8), _record("chrome", 1, chrome, 9.0, 3, 2.7)]
+    )
+    assert s["same_gpu"]["same"] is same
 
 
 # ------------------------------------------------ renderer D on this machine

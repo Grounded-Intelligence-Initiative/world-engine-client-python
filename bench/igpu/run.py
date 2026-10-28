@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import statistics
@@ -61,6 +62,59 @@ def gpu_class(text: str | None) -> str | None:
         if any(w in t for w in words):
             return vendor
     return None
+
+
+def angle_fields(text: str) -> list[str] | None:
+    """The fields of Chrome's "ANGLE (vendor, device, API)" string, split at the
+    commas outside brackets (llvmpipe's name has one inside), or None."""
+    t = text.strip()
+    if not (t.startswith("ANGLE (") and t.endswith(")")):
+        return None
+    fields, depth, cur = [], 0, ""
+    for ch in t[len("ANGLE (") : -1]:
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth == 0:
+            fields.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    return [*fields, cur.strip()]
+
+
+def device_name(text: str | None) -> str | None:
+    """A GPU's name as both paths report it, made comparable: renderer D's
+    adapter name, or the device in Chrome's ANGLE string, lower case, without
+    "(R)", "(TM)", PCI ids, ANGLE's backend words and bus suffixes."""
+    if not text:
+        return None
+    t = text.strip()
+    fields = angle_fields(t)
+    if fields:
+        t = fields[1] if len(fields) > 1 else fields[0]
+    t = t.lower()
+    wrapped = re.fullmatch(r"vulkan [\d.]+ \((.*)\)", t)  # ANGLE on Vulkan
+    if wrapped:
+        t = wrapped.group(1)
+    t = re.sub(r"^angle metal renderer:\s*", "", t)  # ANGLE on Metal
+    t = re.sub(r"^mesa\s+", "", t)  # ANGLE on Mesa's OpenGL
+    t = t.split("/")[0]  # NVIDIA's "/PCIe/SSE2"
+    t = re.sub(r"\s+direct3d.*$", "", t)  # ANGLE on D3D11: "Direct3D11 vs_5_0 ps_5_0"
+    t = re.sub(r"\((?:r|tm)\)|\(0x[0-9a-f]+\)", " ", t)
+    return re.sub(r"\s+", " ", t).strip() or None
+
+
+def gpu_identity(text: str | None) -> str | None:
+    """What a run ran on, for comparing the two paths: "software" for any CPU
+    renderer (the CPU is the adapter then), else the GPU's device name."""
+    if gpu_class(text) == "software":
+        return "software"
+    return device_name(text)
+
+
+def same_device(a: str, b: str) -> bool:
+    """Two identities name one GPU: equal, or one is the other with more
+    words after it ("intel uhd graphics" and "intel uhd graphics (tgl gt1)")."""
+    return a == b or a.startswith(b + " ") or b.startswith(a + " ")
 
 
 def round_order(keys: list[str], rnd: int) -> list[str]:
@@ -132,7 +186,13 @@ def stats(values: list[float]) -> dict:
     }
 
 
-def summarize(runs: list[dict]) -> dict:
+def summarize(runs: list[dict], planned: list[tuple[str, int]] | None = None) -> dict:
+    """The numbers per path, the checks of README.md and the verdict.
+
+    ``planned``: the (key, round) of every run the bench meant to do (default:
+    those in ``runs``). ``pass`` is True only when every planned run worked
+    and every check was judged and passed; False when a check failed; None
+    otherwise (``complete`` False, ``incomplete_because`` says why)."""
     by_key: dict[str, list[dict]] = {}
     for r in runs:
         by_key.setdefault(r["key"], []).append(r)
@@ -168,8 +228,22 @@ def summarize(runs: list[dict]) -> dict:
         out["paths"][key] = entry
     out["d_over_chrome"] = speed_ratio(by_key)
     out["same_gpu"] = same_gpu(by_key)
+    done = {(r["key"], r.get("round")) for r in runs}
+    planned = sorted(done) if planned is None else list(planned)
+    out["failed_runs"] = [f"{r['key']} round {r.get('round')}" for r in runs if not r.get("ok")]
+    out["missing_runs"] = [f"{k} round {n}" for k, n in planned if (k, n) not in done]
     out["checks"] = checks(out)
-    out["pass"] = all(c["pass"] for c in out["checks"] if c["pass"] is not None)
+    why = []
+    if out["failed_runs"]:
+        why.append(f"{len(out['failed_runs'])} run(s) failed: {', '.join(out['failed_runs'])}")
+    if out["missing_runs"]:
+        why.append(f"not run: {', '.join(out['missing_runs'])}")
+    why += [f"not judged: {c['name']}" for c in out["checks"] if c["pass"] is None]
+    verdicts = [c["pass"] for c in out["checks"]]
+    out["complete"] = not why
+    out["incomplete_because"] = why
+    out["pass"] = False if False in verdicts else (True if out["complete"] else None)
+    out["verdict"] = {True: "PASS", False: "FAIL", None: "INCOMPLETE"}[out["pass"]]
     return out
 
 
@@ -199,21 +273,27 @@ def speed_ratio(by_key: dict) -> dict | None:
 
 
 def same_gpu(by_key: dict) -> dict:
-    d = {
-        gpu_class((r.get("adapter") or {}).get("adapter"))
-        for r in by_key.get("d", [])
-        if r.get("ok")
-    }
-    c = {
-        gpu_class((r.get("adapter") or {}).get("adapter"))
-        for r in by_key.get("chrome", [])
-        if r.get("ok")
-    }
-    known = None not in d | c and d and c
+    """Whether renderer D's timed runs and the browser path's ran on one GPU
+    (or both on the CPU), by the names they report: the speed check means
+    something only then. None when a name says nothing comparable."""
+    found = {}
+    for key in ("d", "chrome"):
+        found[key] = {
+            gpu_identity((r.get("adapter") or {}).get("adapter"))
+            for r in by_key.get(key, [])
+            if r.get("ok")
+        }
+    d, c = found["d"], found["chrome"]
+    same = None
+    if d and c and None not in d | c:
+        if len(d) > 1 or len(c) > 1:
+            same = False  # a path changed adapters between rounds
+        else:
+            same = same_device(next(iter(d)), next(iter(c)))
     return {
         "d": sorted(x or "?" for x in d),
         "chrome": sorted(x or "?" for x in c),
-        "same": (d == c and len(d) == 1) if known else None,
+        "same": same,
     }
 
 
@@ -249,15 +329,24 @@ def checks(summary: dict) -> list[dict]:
         }
     )
     ratio = summary.get("d_over_chrome") or {}
-    same = summary.get("same_gpu", {}).get("same")
+    gpus = summary.get("same_gpu", {})
+    same = gpus.get("same")
     value = ratio.get("median_ratio")
+    name = "r2_400k: renderer D not slower than the browser path on the same GPU (median "
+    name += "steps/s ratio >= 1)"
+    if value is not None and same is False:
+        name += (
+            f"; the paths ran on different GPUs (renderer D: {', '.join(gpus.get('d', []))}; "
+            f"browser path: {', '.join(gpus.get('chrome', []))}), so it is not judged"
+        )
+    elif value is not None and same is None:
+        name += "; which GPU each path ran on is not known, so it is not judged"
     out.append(
         {
-            "name": "r2_400k: renderer D not slower than the browser path (median steps/s ratio "
-            ">= 1)" + ("" if same else "; only meaningful when both used the same GPU"),
+            "name": name,
             "value": value,
             "limit": 1.0,
-            "pass": None if value is None else value >= 1.0,
+            "pass": None if value is None or same is not True else value >= 1.0,
             "same_gpu": same,
         }
     )
@@ -415,6 +504,9 @@ def main(argv: list[str] | None = None) -> int:
             out.write_text(json.dumps(result, indent=1, default=str))  # what there is so far
             return record
 
+        planned = [(key, rnd) for rnd in range(1, a.rounds + 1) for key in keys]
+        if "chrome" in keys and not a.no_lossless:
+            planned.append(("chrome_png", 0))
         for rnd in range(1, a.rounds + 1):
             for slot, key in enumerate(round_order(keys, rnd)):
                 launch(key, {**base, **PATHS[key], "timed": True}, rnd, slot)
@@ -428,13 +520,24 @@ def main(argv: list[str] | None = None) -> int:
             }
             launch("chrome_png", spec, 0, 0)
 
-        result["summary"] = summarize(result["runs"])
+        result["summary"] = summary = summarize(result["runs"], planned)
         result["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         out.write_text(json.dumps(result, indent=1, default=str))
         print(f"[bench] wrote {out}", flush=True)
-        for c in result["summary"]["checks"]:
-            verdict = {True: "pass", False: "FAIL", None: "n/a"}[c["pass"]]
+        for c in summary["checks"]:
+            verdict = {True: "pass", False: "FAIL", None: "not judged"}[c["pass"]]
             print(f"[bench] {verdict}: {c['name']}: {c['value']}", flush=True)
+        gpus = summary["same_gpu"]
+        print(
+            f"[bench] GPU of renderer D: {', '.join(gpus['d']) or '-'}; of the browser path: "
+            f"{', '.join(gpus['chrome']) or '-'}; the same: {gpus['same']}",
+            flush=True,
+        )
+        print(
+            f"[bench] verdict: {summary['verdict']}"
+            + (f" ({'; '.join(summary['incomplete_because'])})" if not summary["complete"] else ""),
+            flush=True,
+        )
     finally:
         if a.keep_cache:
             print(f"[bench] kept {work}", flush=True)
