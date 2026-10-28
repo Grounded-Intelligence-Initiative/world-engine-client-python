@@ -54,6 +54,7 @@ def client_render(stub, monkeypatch):
     """A stub that offers client rendering; LocalRenderer replaced by a fake."""
     FakeRenderer.instances = []
     monkeypatch.setattr(render_module, "available", lambda: True)
+    monkeypatch.setattr(render_module, "_available_plain", lambda: True)
     monkeypatch.setattr(render_module, "LocalRenderer", FakeRenderer)
     env = {**copy.deepcopy(ENV), "cameras": CAMERAS, "render": "client"}
     stub.responders["/control/connect"] = lambda body: {
@@ -436,6 +437,7 @@ def chrome_sim(monkeypatch):
     """LocalRenderer with Playwright and websockets replaced by PageSim."""
     sim = PageSim()
     monkeypatch.setattr(render_module, "available", lambda: True)
+    monkeypatch.setattr(render_module, "_available_plain", lambda: True)
     monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(serve=sim.serve))
     monkeypatch.setitem(sys.modules, "playwright", ModuleType("playwright"))
     async_api = SimpleNamespace(async_playwright=sim.playwright)

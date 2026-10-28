@@ -79,6 +79,7 @@ def sim(monkeypatch):
     test_render's sim."""
     page = PageSim()
     monkeypatch.setattr(render_module, "available", lambda: True)
+    monkeypatch.setattr(render_module, "_available_plain", lambda: True)
     monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(serve=page.serve))
     monkeypatch.setitem(sys.modules, "playwright", ModuleType("playwright"))
     async_api = SimpleNamespace(async_playwright=page.playwright)

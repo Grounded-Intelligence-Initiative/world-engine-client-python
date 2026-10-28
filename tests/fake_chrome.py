@@ -187,6 +187,7 @@ def install(monkeypatch=None) -> Sim:
     async_api = SimpleNamespace(async_playwright=SIM.playwright)
     if monkeypatch is not None:
         monkeypatch.setattr(render, "available", lambda: True)
+        monkeypatch.setattr(render, "_available_plain", lambda: True)
         monkeypatch.setitem(sys.modules, "playwright", playwright)
         monkeypatch.setitem(sys.modules, "playwright.async_api", async_api)
         monkeypatch.delenv("WE_RENDER_CHROME_ARGS", raising=False)
