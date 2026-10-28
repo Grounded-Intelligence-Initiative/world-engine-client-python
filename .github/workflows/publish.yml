@@ -16,6 +16,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The render extra depends on world-engine-swiftshader on Linux x86_64 and
+      # aarch64, which publish-swiftshader.yml publishes (tag swiftshader-v*).
+      # Publish that first: without it, pip cannot install the render extra there.
+      - name: the render extra's world-engine-swiftshader is on PyPI
+        run: |
+          SPEC=$(python -c "import tomllib; r = tomllib.load(open('pyproject.toml', 'rb'))['project']['optional-dependencies']['render']; print(next(s.split(';')[0].strip() for s in r if s.startswith('world-engine-swiftshader')))")
+          for arch in x86_64 aarch64; do
+            python -m pip download --no-deps --only-binary=:all: --python-version 3.12 \
+              --platform "manylinux_2_28_$arch" -d "$RUNNER_TEMP/sws" "$SPEC"
+          done
       - run: python -m pip install build
       - run: python -m build
       - uses: actions/upload-artifact@v4

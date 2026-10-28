@@ -385,5 +385,6 @@ compares the copy with an engine checkout before a release.
 `world-engine-swiftshader` lives in `swiftshader/` with its own `pyproject.toml`
 and its own release workflow (`publish-swiftshader.yml`, tags
 `swiftshader-v<version>`). Publish it before a world-engine-client release that
-needs a new version of it. `python scripts/render_size.py --wheel-dir <wheels>`
-reports the render extra's download size.
+needs a new version of it; `publish.yml` stops a release whose render extra
+names a version that is not on PyPI yet. `python scripts/render_size.py
+--wheel-dir <wheels>` reports the render extra's download size.
