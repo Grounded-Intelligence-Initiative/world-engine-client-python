@@ -533,6 +533,8 @@ class RemoteEnv:
                 warnings.simplefilter("ignore", RuntimeWarning)
                 chrome = LocalRenderer(*args, **common, **{**chrome_opts, "allow_software": False})
         except Exception as exc:  # noqa: BLE001 - no Chrome on the GPU: renderer D draws
+            if getattr(exc, "code", None) == "bad_config":
+                raise  # a setting to fix (WE_RENDER_BROWSER), not a fact to keep for a day
             why = getattr(exc, "code", None) or type(exc).__name__
             render_wgsl.remember_browser(
                 hardware=False, gpu=None, error=why, chrome_args=chrome_args, **search

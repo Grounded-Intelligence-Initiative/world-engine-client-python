@@ -180,10 +180,15 @@ def _auto_install_enabled(option: bool | None) -> bool:
 def browser_choice() -> str:
     """The browser the browser path launches, from WE_RENDER_BROWSER: ``auto``
     (the default: an installed Google Chrome, else this package's headless
-    shell), ``chrome`` or ``shell`` (that one only)."""
+    shell), ``chrome`` or ``shell`` (that one only). Another value is a
+    RendererError with code ``bad_config``."""
     value = (os.environ.get("WE_RENDER_BROWSER") or "auto").strip().lower()
     if value not in _BROWSERS:
-        raise ValueError(f"WE_RENDER_BROWSER must be auto, chrome or shell, not {value!r}")
+        raise RendererError(
+            f"WE_RENDER_BROWSER must be auto, chrome or shell, not {value!r}",
+            code="bad_config",
+            fixes=["set WE_RENDER_BROWSER to auto, chrome or shell, or unset it"],
+        )
     return value
 
 
@@ -200,9 +205,9 @@ def browsers_dir() -> Path:
     return user_cache_dir() / "digiarena" / "browsers"
 
 
-def _shell_revision() -> str | None:
-    """The headless shell build the installed playwright downloads, from its
-    browsers.json; None without playwright."""
+def _shell_entry() -> dict | None:
+    """The headless shell's entry in the installed playwright's browsers.json;
+    None without playwright."""
     import importlib.util
 
     try:
@@ -211,11 +216,41 @@ def _shell_revision() -> str | None:
             return None
         listing = Path(spec.origin).parent / "driver" / "package" / "browsers.json"
         for entry in json.loads(listing.read_text()).get("browsers", []):
-            if entry.get("name") == "chromium-headless-shell":
-                return str(entry["revision"])
-    except (ImportError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            if isinstance(entry, dict) and entry.get("name") == "chromium-headless-shell":
+                return entry
+    except (ImportError, OSError, ValueError, TypeError, AttributeError):
         return None
     return None
+
+
+def _shell_revision() -> str | None:
+    """The headless shell build the installed playwright downloads, from its
+    browsers.json; None without playwright."""
+    entry = _shell_entry()
+    if entry is None or entry.get("revision") is None:
+        return None
+    return str(entry["revision"])
+
+
+def _playwright_version() -> str | None:
+    import importlib.metadata
+
+    try:
+        return importlib.metadata.version("playwright")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _shell_builds(root: Path, rev: str) -> list[Path]:
+    """The directories of ``root`` that can hold that build. Where browsers.json
+    gives a host platform another revision (``revisionOverrides``), Playwright
+    names the directory ``chromium_headless_shell_<platform>_special-<rev>``."""
+    builds = [root / f"{_SHELL_DIR}{rev}"]
+    overrides = (_shell_entry() or {}).get("revisionOverrides") or {}
+    if isinstance(overrides, dict):
+        for other in sorted({str(v) for v in overrides.values()}):
+            builds += sorted(root.glob(f"chromium_headless_shell_*_special-{other}"))
+    return builds
 
 
 def shell_executable(root: str | os.PathLike | None = None) -> Path | None:
@@ -225,13 +260,13 @@ def shell_executable(root: str | os.PathLike | None = None) -> Path | None:
     rev = _shell_revision()
     if rev is None:
         return None
-    build = (Path(root) if root is not None else browsers_dir()) / f"{_SHELL_DIR}{rev}"
-    if not (build / "INSTALLATION_COMPLETE").is_file():
-        return None
-    for name in _SHELL_NAMES:
-        for exe in sorted(build.glob(f"*/{name}")):
-            if exe.is_file():
-                return exe
+    for build in _shell_builds(Path(root) if root is not None else browsers_dir(), rev):
+        if not (build / "INSTALLATION_COMPLETE").is_file():
+            continue
+        for name in _SHELL_NAMES:
+            for exe in sorted(build.glob(f"*/{name}")):
+                if exe.is_file():
+                    return exe
     return None
 
 
@@ -312,12 +347,17 @@ def install_chromium() -> Path:
         found = shell_executable(root)
         if done.returncode != 0 or found is None:
             tail = " | ".join(lines[-4:])[-600:] or "no output"
-            raise RendererError(
-                f"downloading the headless browser into {root} failed (exit code "
-                f"{done.returncode}): {tail}",
-                code="renderer_unavailable",
-                fixes=fixes,
-            )
+            if done.returncode == 0:
+                what = (
+                    f"playwright install finished, but no headless shell of playwright "
+                    f"{_playwright_version()} (build {_shell_revision()}) is in {root}: {tail}"
+                )
+            else:
+                what = (
+                    f"downloading the headless browser into {root} failed (exit code "
+                    f"{done.returncode}): {tail}"
+                )
+            raise RendererError(what, code="renderer_unavailable", fixes=fixes)
         log.info("headless browser ready after %.0f s: %s", time.monotonic() - started, found)
         return found
 
@@ -730,8 +770,10 @@ class LocalRenderer:
                 await self._attempt(args, accept_software=self._allow_software and last)
                 self.chrome_args = args
                 return
-            except _NoBrowser:
-                raise  # no browser at all: no flag set does better
+            except _NoBrowser as exc:
+                # No browser at all: no flag set does better. The caller gets
+                # the public type, with the fixes.
+                raise RendererError(exc.reason, code=exc.code, fixes=exc.fixes) from None
             except RendererError as exc:
                 failures.append((exc, args))
                 self._failures.append(self._redact(f"{' '.join(args)} -> {exc}"))

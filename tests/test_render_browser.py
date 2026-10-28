@@ -349,9 +349,42 @@ def test_a_failed_download_is_tried_once_and_says_how_to_fix_it(sim, shell_dir, 
         start(sim, timeout=10, auto_install=True)
     text = str(caught.value)
     assert caught.value.code == "renderer_unavailable"
+    assert type(caught.value) is wec.RendererError, "the public type, not a private one"
     assert "ENOTFOUND" in text and "python -m world_engine_client.render install" in text
     assert "HTTPS_PROXY" in text and "images=False" in text
     assert len(calls) == 1, "one download for all flag sets"
+
+
+def test_an_install_that_leaves_no_shell_says_so(sim, shell_dir, monkeypatch):
+    """Playwright's installer exits 0 but the build is not where this client
+    looks (another playwright's layout): the error says that, not "failed
+    (exit code 0)"."""
+    monkeypatch.setattr(
+        render_module.subprocess, "run", lambda cmd, **kw: SimpleNamespace(returncode=0, stdout=b"")
+    )
+    with pytest.raises(wec.RendererError) as caught:
+        render_module.install_chromium()
+    text = str(caught.value)
+    assert "finished, but no headless shell of playwright" in text and "(build 4242)" in text
+    assert "exit code" not in text
+
+
+def test_a_build_of_a_revision_override_is_found(shell_dir, monkeypatch):
+    """Where browsers.json gives a host platform another revision, Playwright
+    names the directory chromium_headless_shell_<platform>_special-<rev>."""
+    entry = {"name": "chromium-headless-shell", "revision": REV}
+    entry["revisionOverrides"] = {"mac14": "4200", "mac14-arm64": "4200"}
+    monkeypatch.setattr(render_module, "_shell_entry", lambda: entry)
+    special = shell_dir / "chromium_headless_shell_mac14-arm64_special-4200"
+    other = shell_dir / "chromium_headless_shell_mac14-arm64_special-9999"
+    for build in (other, special):
+        exe = build / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell"
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"")
+        (build / "INSTALLATION_COMPLETE").write_bytes(b"")
+    assert render_module.shell_executable() == exe
+    entry["revisionOverrides"] = {}
+    assert render_module.shell_executable() is None
 
 
 def test_a_failed_download_is_tried_once_where_chrome_is_there_but_fails(
@@ -400,6 +433,7 @@ def test_missing_system_libraries_point_to_install_deps(sim, shell_dir, monkeypa
     with pytest.raises(wec.RendererError) as caught:
         start(sim, timeout=10, auto_install=True)
     assert caught.value.fixes == [render_module._SYSTEM_DEPS_FIX]
+    assert type(caught.value) is wec.RendererError
     assert "install-deps" in str(caught.value) and "--with-deps" not in str(caught.value)
 
 
@@ -461,8 +495,35 @@ def test_we_render_browser_takes_three_values(monkeypatch):
         monkeypatch.setenv("WE_RENDER_BROWSER", value)
         assert render_module.browser_choice() == value.strip().lower()
     monkeypatch.setenv("WE_RENDER_BROWSER", "firefox")
-    with pytest.raises(ValueError, match="WE_RENDER_BROWSER"):
+    with pytest.raises(wec.RendererError, match="WE_RENDER_BROWSER") as caught:
         render_module.browser_choice()
+    assert caught.value.code == "bad_config"
+    assert caught.value.fixes == ["set WE_RENDER_BROWSER to auto, chrome or shell, or unset it"]
+
+
+def test_a_mistyped_we_render_browser_stops_the_start_with_its_fix(sim, monkeypatch):
+    monkeypatch.setenv("WE_RENDER_BROWSER", "shel")
+    with pytest.raises(wec.RendererError) as caught:
+        start(sim, timeout=10)
+    assert caught.value.code == "bad_config" and "'shel'" in str(caught.value)
+
+
+def test_a_mistyped_we_render_browser_is_not_kept_as_no_chrome_on_the_gpu(sim, monkeypatch):
+    """Where renderer D would draw on the CPU, the client starts Chrome to see
+    whether it reaches the GPU, and keeps a "no" for a day. A typo in
+    WE_RENDER_BROWSER is not a "no": connect stops on it, and nothing is kept."""
+    from world_engine_client import env as env_module
+    from world_engine_client import render_wgsl
+
+    kept = []
+    monkeypatch.setattr(render_wgsl, "remember_browser", lambda **kw: kept.append(kw))
+    monkeypatch.setenv("WE_RENDER_BROWSER", "shel")
+    remote = object.__new__(env_module.RemoteEnv)
+    search = {"adapter": "auto", "allow_software": True, "cache_dir": None}
+    args = (lambda path, headers=None: None, SCENE, {})
+    with pytest.raises(wec.RendererError) as caught:
+        remote._chrome_on_the_gpu(args, {}, {}, None, search)
+    assert caught.value.code == "bad_config" and kept == []
 
 
 # ---------------------------------------------------------------- where and how
