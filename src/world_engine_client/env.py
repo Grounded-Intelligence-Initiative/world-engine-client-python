@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import math
+import re
 import select
 import threading
 import time
@@ -49,6 +51,8 @@ from .errors import (
     raise_for,
 )
 
+log = logging.getLogger("world_engine_client.env")
+
 MAX_RESPONSE = 64 * 1024 * 1024
 
 _PROTO = 3
@@ -64,6 +68,14 @@ _NO_WGPU = (
     "pip install -U 'world-engine-client[render]'"
 )
 _warned: set[str] = set()
+# The platform may answer a request for a scene asset with a redirect to its
+# storage: a presigned URL, valid for minutes (RemoteEnv._open_stored).
+_REDIRECTS = (301, 302, 303, 307, 308)
+# Seconds to connect to that storage, TLS included. Where a network drops the
+# packets, an env waits this long once, then has the platform stream.
+_STORAGE_CONNECT_SECONDS = 10.0
+# Its host as urlsplit gives it: a name in lower case or an IP address.
+_STORAGE_HOST = re.compile(r"[a-z0-9.:-]+")
 
 
 def connect(
@@ -208,6 +220,10 @@ class RemoteEnv:
         self.renderer = None  # LocalRenderer when images are rendered on this machine
         # False: step() returns a staged reward in points (see connect).
         self.normalize_reward = True
+        # Scene assets from the platform's storage (_open_stored): its failures
+        # so far, and True once this env has the platform stream them instead.
+        self._storage_failures = 0
+        self._stream_assets = False
 
     # ----- Gym API ------------------------------------------------------------ #
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -767,7 +783,15 @@ class RemoteEnv:
         connection (the renderer runs on another thread). ``headers`` adds
         request headers, a ``Range`` to resume a download. 404 raises
         FileNotFoundError, any other error status RenderFetchError with the
-        server's code and message. Waits at most 60 s for each piece of data."""
+        server's code and message. Waits at most 60 s for each piece of data.
+
+        A request for a scene asset (``/__asset/*``) says that this client
+        follows a redirect (``X-We-Render-Redirect: 1``), so the platform may
+        send it to its storage instead of streaming the file (_open_stored).
+        When nothing came from there, the platform is asked again: for a new
+        URL, or for the stream once storage failed this env (_storage_failed).
+        Redirects of other paths, and of a request without the header, are
+        error statuses."""
         parsed = urllib.parse.urlsplit(self._base)
         transport = (
             http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
@@ -776,6 +800,9 @@ class RemoteEnv:
         sent = {"X-We-Control-Token": self._token}
         if self._access_provider:
             sent["Authorization"] = "Bearer " + self._access_provider()
+        redirect = path.startswith("/__asset/") and not self._stream_assets
+        if redirect:
+            sent["X-We-Render-Redirect"] = "1"
         sent.update(headers or {})
         try:
             conn.request("GET", self._prefix + "/render" + path, headers=sent)
@@ -783,6 +810,15 @@ class RemoteEnv:
         except BaseException:
             conn.close()
             raise
+        if redirect and response.status in _REDIRECTS:
+            location = response.getheader("Location") or ""
+            conn.close()
+            stored = self._open_stored(location, headers)
+            if stored is not None:
+                return stored
+            # Each failure counts, and the second one has the next request ask
+            # for the stream, so this asks again at most twice.
+            return self._open_render(path, headers)
         if response.status == 404:
             conn.close()
             raise FileNotFoundError(path)
@@ -804,6 +840,64 @@ class RemoteEnv:
                 fixes=fixes if isinstance(fixes, list) else None,
             )
         return _Owned(response, conn)
+
+    def _open_stored(self, location: str, headers: dict | None):
+        """GET a scene asset where the platform redirected (a presigned URL of
+        its storage), on a new connection that carries the request's Range and
+        none of its other headers: the URL carries its own signature, and the
+        control token and the Authorization header stay with the platform. An
+        https platform's URL must be https too; a redirect from storage is not
+        followed. None when nothing came, and the caller asks the platform
+        again, which signs a new URL: a URL that failed is not used again. A
+        body that breaks off counts as a failure as well (_Stored). The bytes
+        go through the checks the platform's go through (SceneAssets)."""
+        try:
+            scheme, host, port, target = _storage_url(
+                location, https=urllib.parse.urlsplit(self._base).scheme == "https"
+            )
+        except ValueError as exc:
+            self._storage_failed(f"the platform redirected to {exc}", at_once=True)
+            return None
+        transport = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+        conn = transport(host, port, timeout=_STORAGE_CONNECT_SECONDS)
+        sent = {k: v for k, v in (headers or {}).items() if k.lower() == "range"}
+        try:
+            conn.connect()
+            conn.sock.settimeout(max(self._timeout, 60))  # each piece, as from the platform
+            conn.request("GET", target, headers=sent)
+            response = conn.getresponse()
+        except (http.client.InvalidURL, ValueError):  # their messages hold the URL
+            conn.close()
+            self._storage_failed("the platform redirected to an unusable URL", at_once=True)
+            return None
+        except (OSError, http.client.HTTPException) as exc:
+            conn.close()
+            self._storage_failed(f"storage at {host} cannot be reached: {exc!r}", at_once=True)
+            return None
+        except BaseException:
+            conn.close()
+            raise
+        if response.status not in (200, 206):
+            conn.close()
+            self._storage_failed(f"storage at {host} answered HTTP {response.status}")
+            return None
+        return _Stored(response, conn, self, host)
+
+    def _storage_failed(self, why: str, *, at_once: bool = False) -> None:
+        """Count a failure of the platform's storage. After storage that
+        cannot be reached or a URL this client does not follow (``at_once``),
+        or after a second failure, this env asks the platform to stream its
+        scene assets, as a client without redirects does, for the rest of its
+        life. One log line says so."""
+        self._storage_failures += 1
+        if self._stream_assets or not (at_once or self._storage_failures >= 2):
+            return
+        self._stream_assets = True
+        log.info(
+            "this session's scene assets stream from the platform from now on: %s%s",
+            why,
+            "" if at_once else " (the second failure)",
+        )
 
     @staticmethod
     def _np_obs(obs: dict) -> dict:
@@ -838,3 +932,55 @@ class _Owned:
 
     def __exit__(self, *exc):
         self._conn.close()
+
+
+class _Stored(_Owned):
+    """A scene asset's response from the platform's storage. A body that
+    breaks off counts as one failure of storage (RemoteEnv._storage_failed);
+    the download then resumes through the platform."""
+
+    def __init__(self, response, conn, env: RemoteEnv, host: str):
+        super().__init__(response, conn)
+        self._env, self._host, self._broke = env, host, False
+
+    def read(self, amt=None):
+        try:
+            data = self._response.read(amt)
+        except (OSError, http.client.HTTPException) as exc:
+            self._failed(repr(exc))
+            raise
+        if amt and not data and self._response.length:
+            # http.client ends a read quietly on a connection that closed early.
+            self._failed(f"{self._response.length} bytes short")
+        return data
+
+    def _failed(self, why: str) -> None:
+        if not self._broke:
+            self._broke = True
+            self._env._storage_failed(f"the download from {self._host} broke off: {why}")
+
+
+def _storage_url(location: str, *, https: bool) -> tuple[str, str, int | None, str]:
+    """Where a redirect to the platform's storage leads: (scheme, host, port,
+    request target). ValueError for a URL this client does not follow, saying
+    why without the URL's path or query (its signature): anything but an
+    absolute http or https URL with a plain host name, an http URL from a
+    platform on https, and characters a request line cannot carry."""
+    try:
+        url = urllib.parse.urlsplit(location)
+        port = url.port
+    except ValueError:
+        raise ValueError("an unusable URL") from None
+    if url.scheme == "http" and https:
+        raise ValueError("an http URL while it is on https")
+    host = url.hostname or ""
+    target = (url.path or "/") + (f"?{url.query}" if url.query else "")
+    if (
+        url.scheme not in ("http", "https")
+        or not _STORAGE_HOST.fullmatch(host)
+        or url.username is not None
+        or not target.isascii()
+        or any(c <= " " or c == "\x7f" for c in target)
+    ):
+        raise ValueError("an unusable URL")
+    return url.scheme, host, port, target

@@ -171,8 +171,9 @@ def private_cache(tmp_path, monkeypatch):
     return root
 
 
-def start_stub() -> ControlStub:
-    """A ControlStub on a loopback port; ``state.close()`` stops it."""
+def start_stub(context=None) -> ControlStub:
+    """A ControlStub on a loopback port; ``state.close()`` stops it. With an
+    ``ssl.SSLContext`` it answers on https."""
     state = ControlStub()
 
     class Handler(BaseHTTPRequestHandler):
@@ -218,8 +219,14 @@ def start_stub() -> ControlStub:
     state.handler_class = Handler  # a test may set Handler.timeout: idle connections close
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
+    if context is not None:
+        # The handshake in each request's thread, not in the one that accepts.
+        server.socket = context.wrap_socket(
+            server.socket, server_side=True, do_handshake_on_connect=False
+        )
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    state.url = f"http://127.0.0.1:{server.server_address[1]}"
+    scheme = "https" if context is not None else "http"
+    state.url = f"{scheme}://127.0.0.1:{server.server_address[1]}"
 
     def close():
         server.shutdown()
