@@ -2,8 +2,38 @@
 
 ## 0.7.1
 
-Documentation only. The code is 0.7.0's; the README, the docstrings and the
-version number changed. They now cover what an engine with mobile bases and
+Three fixes, and documentation.
+
+- Renderer D frees its GPU device when the session closes. In wgpu-py 0.32 a
+  device and its queue refer to each other, so up to 0.7.0 the device, its
+  queue and its adapter outlived `close()` until Python's cyclic garbage
+  collector ran: 50 sessions in one process, without a collection, grew it
+  from 222 to 1,201 MiB, from 65 to 113 threads and from 34 to 154 file
+  descriptors. `close()` now clears those references, so all three go when
+  it returns. If the device is still there after that (another wgpu-py), it
+  runs one collection, except while the interpreter shuts down. Calling it
+  again does nothing. On an RTX 4090, 50 sessions of the tests' scene stay
+  at 230 to 239 MiB, 66 threads and 35 file descriptors; 20 sessions grew
+  0.7.0 from 227 to 1,831 MiB, 66 to 146 threads and 35 to 235 file
+  descriptors. The device of an adapter renderer D failed on, and of a scene
+  it could not draw, also goes as soon as the next adapter or the browser
+  path takes over.
+- A client without wgpu, upgraded without the render extra
+  (`pip install -U digiarena`, or `pip install -U world-engine-client`
+  alone), still offers the server only the browser path, and now says so:
+  one `RuntimeWarning` per process that renderer D needs the render extra,
+  with the command, `pip install -U 'world-engine-client[render]'`, and the
+  reason in `info["render"]["reason"]` of every session. Neither appears when
+  the caller asks for the browser path (`render_options={"renderer":
+  "chrome"}` or `WE_RENDERER=chrome`).
+- With `adapter="software"`, or a software adapter by name, the software
+  warning says that renderer D draws on the CPU as asked, and how fast. It
+  used to say that Vulkan reaches no GPU, and on a machine whose NVIDIA GPU
+  Vulkan does reach it said to install the libraries the NVIDIA Vulkan driver
+  loads. `info["render"]["reason"]` says the adapter was asked for, not "no
+  hardware adapter".
+
+The README and the docstrings now cover what an engine with mobile bases and
 several robots sends, which 0.7.0 already handles. The numbers below were
 checked with 0.7.0 against such an engine, in a TidyBot scene, a scene with
 two Pandas and scenes with a TidyBot and a Panda in either order.
@@ -28,11 +58,9 @@ two Pandas and scenes with a TidyBot and a Panda in either order.
   scene camera wins over a default camera of the same name. Renderer D draws
   each at its own size.
 - The README says to upgrade with the extra,
-  `pip install -U 'world-engine-client[render]'`. pip does not remember
-  extras, and a client without wgpu offers the server only the browser path:
-  after `pip install -U world-engine-client` alone, where an earlier
-  release's render extra installed Playwright, headless Chrome draws the
-  images with no warning.
+  `pip install -U 'world-engine-client[render]'`: pip does not remember
+  extras, and a client without wgpu offers the server only the browser path
+  (the second fix above).
 - `robot0_eef_target_pos` and `robot0_eef_target_quat`, the commanded pose,
   are in the observation list; `robot0_eef_pos` and `robot0_eef_quat` are the
   measured one.

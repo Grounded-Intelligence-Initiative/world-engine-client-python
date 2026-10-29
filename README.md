@@ -89,10 +89,13 @@ pip install 'world-engine-client[render]'
 
 Upgrade with the extra as well, `pip install -U 'world-engine-client[render]'`.
 pip does not remember extras, so `pip install -U world-engine-client` alone
-leaves wgpu out. A client without wgpu offers the server only the browser
-path: where an earlier release's render extra installed Playwright, headless
-Chrome then draws the images with no warning (`info["render"]["renderer"]` is
-`"chrome"`).
+(or `pip install -U digiarena`) leaves wgpu out. A client without wgpu offers
+the server only the browser path: where an earlier release's render extra
+installed Playwright, headless Chrome then draws the images
+(`info["render"]["renderer"]` is `"chrome"`). One `RuntimeWarning` per process
+says so and gives the command above, and `info["render"]["reason"]` says it
+for every session. `render_options={"renderer": "chrome"}` (or
+`WE_RENDERER=chrome`) asks for the browser path, and then neither appears.
 
 A server with renderer D (render protocol 2) has its scenes drawn by
 `WGSLRenderer`: a WGSL renderer on wgpu, in this process, with no browser. It
@@ -145,7 +148,10 @@ warm-up when the rendering is slower than real time (29.4 steps per second, one
 step per 0.034 s), naming the adapter, its type and the measured rate. On a
 machine with an NVIDIA GPU that Vulkan cannot reach, the warning says to
 install `libx11-6 libxext6 libegl1` and, in a container, to add `graphics` to
-`NVIDIA_DRIVER_CAPABILITIES`. The probes import wgpu from where your process
+`NVIDIA_DRIVER_CAPABILITIES`. A software adapter you ask for (an `adapter` of
+`"software"`, or a software adapter by name) gets a warning that says only
+that the CPU draws, as asked, and how fast; `info["render"]["reason"]` says
+it was asked for. The probes import wgpu from where your process
 does (its `sys.path`), so `pip install --user` and `PYTHONPATH` installs work.
 
 A Linux machine can show a GPU (a `/dev/dri/renderD*` node, `/dev/nvidiactl`)
@@ -516,7 +522,9 @@ R = rot6d_to_matrix(demo["action_dict/abs_rot_6d"][t])
   negotiated control mode and cameras (needs the `gym` extra); `env.as_gymnasium()`
   returns a full `gymnasium.Env`.
 - `RemoteEnv` is a context manager: `with we_client.connect(...) as env:`
-  releases the controller lock on exit.
+  releases the controller lock on exit. `close()`, which the `with` block
+  calls, also frees renderer D's GPU device at once, so one process can attach
+  and release again and again without growing.
 - Errors are typed (`TokenError`, `ControllerConflictError`,
   `ResetRequiredError`, `TeleopActiveError`, `BadConfigError`) and carry the
   server's "Possible fixes" hints.
