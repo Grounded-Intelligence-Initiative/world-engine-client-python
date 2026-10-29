@@ -6,7 +6,7 @@ Documentation only. The code is 0.7.0's; the README, the docstrings and the
 version number changed. They now cover what an engine with mobile bases and
 several robots sends, which 0.7.0 already handles. The numbers below were
 checked with 0.7.0 against such an engine, in a TidyBot scene, a scene with
-two Pandas and one with a TidyBot and a Panda.
+two Pandas and scenes with a TidyBot and a Panda in either order.
 
 - Scenes with a mobile base: a connect without `control_mode` gets
   `osc_pose_delta_base_vel`, `Box(-1, 1, (10,))`, laid out
@@ -22,9 +22,17 @@ two Pandas and one with a TidyBot and a Panda.
   `robots`, prefixed `parts`, `gripper_index` and `gripper_indices`, and the
   observations add `robot{i}_*` for each robot after the first.
 - Cameras: `available_cameras` and `cameras` in the metadata, the default
-  `wrist` (128×128), `robot{i}_wrist` for each robot after the first, and the
-  TidyBot's `robot0_wrist` (256×192) and `robot0_base` (256×144), which follow
-  the links they ride. Renderer D draws each at its own size.
+  `wrist` (128×128), `robot{i}_wrist` for each robot after the first, and a
+  TidyBot's `robot{i}_wrist` (256×192) and `robot{i}_base` (256×144),
+  `robot0_*` when it is the first robot, which follow the links they ride. A
+  scene camera wins over a default camera of the same name. Renderer D draws
+  each at its own size.
+- The README says to upgrade with the extra,
+  `pip install -U 'world-engine-client[render]'`. pip does not remember
+  extras, and a client without wgpu offers the server only the browser path:
+  after `pip install -U world-engine-client` alone, where an earlier
+  release's render extra installed Playwright, headless Chrome draws the
+  images with no warning.
 - `robot0_eef_target_pos` and `robot0_eef_target_quat`, the commanded pose,
   are in the observation list; `robot0_eef_pos` and `robot0_eef_quat` are the
   measured one.

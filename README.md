@@ -87,6 +87,13 @@ network. This needs the `render` extra:
 pip install 'world-engine-client[render]'
 ```
 
+Upgrade with the extra as well, `pip install -U 'world-engine-client[render]'`.
+pip does not remember extras, so `pip install -U world-engine-client` alone
+leaves wgpu out. A client without wgpu offers the server only the browser
+path: where an earlier release's render extra installed Playwright, headless
+Chrome then draws the images with no warning (`info["render"]["renderer"]` is
+`"chrome"`).
+
 A server with renderer D (render protocol 2) has its scenes drawn by
 `WGSLRenderer`: a WGSL renderer on wgpu, in this process, with no browser. It
 sorts the splats on the GPU, draws every camera in one frame and reads the
@@ -424,8 +431,9 @@ robot ids in that order (a scene with one robot has no `robots`). Each schema
 in `env.metadata["control_mode_schemas"]` then reports:
 
 - `action_dim`: the sum of the robots' parts;
-- `parts` with a robot prefix, from `robot0_dpos` to the last robot's
-  `gripper`;
+- `parts`: every robot's parts in action order, each name prefixed with
+  `robot{i}_` (in `osc_pose_delta_base_vel` a mobile robot's
+  `robot{i}_base_vel` follows its gripper);
 - `robots`: the robot ids in that order;
 - `gripper_index`: the first robot's gripper dim;
 - `gripper_indices`: every robot's gripper dim.
@@ -434,17 +442,18 @@ in `env.metadata["control_mode_schemas"]` then reports:
 | --- | --- | --- | --- |
 | two Pandas | `osc_pose_delta` | 14 values (7 + 7) | 6, 13 |
 | a TidyBot, then a Panda | `osc_pose_delta_base_vel` | 17 values (10 + 7) | 6, 16 |
+| a Panda, then a TidyBot | `osc_pose_delta_base_vel` | 17 values (7 + 10) | 6, 13 |
 
 In `osc_pose_delta_base_vel` a robot on a mobile base takes 10 values and a
 fixed-base robot 7, whose arm values stay in the world frame: the schema's
-`frames` lists each robot's arm frame (`["base", "world"]` above), and its
-`frame` is the first robot's. In `osc_pose_delta` and `osc_pose_abs` every
-robot takes 7 values, in `ee_pos_delta` 4.
+`frames` lists each robot's arm frame (`["base", "world"]` for a TidyBot,
+then a Panda), and its `frame` is the first robot's. In `osc_pose_delta` and
+`osc_pose_abs` every robot takes 7 values, in `ee_pos_delta` 4.
 
 `env.action_space` keeps every gripper dim within ±1, by the rule the server
 checks actions with: the schema's `gripper_indices`, else its `gripper_index`,
 else the last dim. In `osc_pose_abs` the other dims are unbounded. Clients
-0.4.2 to 0.6.0 bounded only the last dim, so with several robots in
+before 0.7.0 bounded only the last dim, so with several robots in
 `osc_pose_abs` a sampled action could fail the server's check.
 
 Observations add `robot{i}_eef_pos`, `robot{i}_eef_quat`,
@@ -461,22 +470,29 @@ of them. `env.metadata["available_cameras"]` lists every camera with its
 `width` and `height`, `env.metadata["cameras"]` the ones this session draws,
 and `obs["rgb"][name]` is a `(height, width, 3) uint8` array.
 
-- A scene of one fixed-base robot has the scene's cameras (by default
-  `third_person` and `top_down`, 256×256) and `wrist` (by default 128×128),
-  which rides the hand. A scene camera named `wrist` replaces it.
+- A scene whose first robot has a fixed base has the default `third_person`
+  and `top_down` (256×256) and `wrist` (128×128), which rides that robot's
+  hand.
 - Every robot after the first has its own `robot{i}_wrist` on its hand, and
-  `robot{i}_<name>` for the cameras its model brings.
-- A first robot on a mobile base has no `wrist`: its own `robot0_wrist` takes
-  the place, and its model's other cameras come too. The TidyBot brings
-  `robot0_wrist` (256×192, 41.8° vertical field of view, beside its gripper)
-  and `robot0_base` (256×144, 52.2°, on the base, looking ahead and down).
-  `third_person` and `top_down` keep their pose relative to the robot's
-  starting pose. `cameras=["wrist"]` there raises `BadConfigError`, whose
+  `robot{i}_<name>` for the cameras its model brings: a Panda's
+  `robot{i}_wrist` is 128×128, and a TidyBot placed second brings
+  `robot1_wrist` (256×192) and `robot1_base` (256×144).
+- A first robot on a mobile base has no default `wrist`: its own
+  `robot0_wrist` takes the place, and its model's other cameras come too. The
+  TidyBot brings `robot0_wrist` (256×192, 41.8° vertical field of view, beside
+  its gripper) and `robot0_base` (256×144, 52.2°, on the base, looking ahead
+  and down). The default `third_person` and `top_down` keep their pose
+  relative to the robot's starting pose. Unless the scene has a camera of its
+  own named `wrist`, `cameras=["wrist"]` there raises `BadConfigError`, whose
   fixes point at `robot0_wrist`.
+
+The scene's own cameras come too, each where it was placed, and a scene camera
+wins over a default camera of the same name.
 
 A camera on a robot link follows the link's measured pose: every observation's
 `render_state` carries each camera's pose, and the client draws the camera
-there, so `robot0_wrist` and `robot0_base` move with the arm and the base.
+there, so a TidyBot's `robot{i}_wrist` and `robot{i}_base` move with its arm
+and its base.
 Renderer D draws each camera at its own size.
 
 ### 6D rotation helpers

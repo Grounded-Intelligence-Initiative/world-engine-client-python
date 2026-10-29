@@ -109,10 +109,11 @@ def connect(
     assets are kept in the render cache (:mod:`world_engine_client.cache`): the
     hosting platform's arrive encrypted and stay encrypted on disk.
     ``images=True`` selects every camera of the scene, those on robot links
-    included (``robot0_wrist`` and ``robot0_base`` of a TidyBot,
-    ``robot{i}_wrist`` of the robots after the first); ``cameras`` selects
-    some by name. ``env.metadata['available_cameras']`` lists them with their
-    sizes, and each ``obs['rgb'][name]`` is ``(height, width, 3) uint8``.
+    included (``robot{i}_wrist`` of each robot after the first, and a
+    TidyBot's ``robot{i}_wrist`` and ``robot{i}_base``, ``robot0_*`` when it is
+    the first robot); ``cameras`` selects some by name.
+    ``env.metadata['available_cameras']`` lists them with their sizes, and each
+    ``obs['rgb'][name]`` is ``(height, width, 3) uint8``.
 
     ``normalize_reward`` (default True) returns each reward as the server sends
     it. The server divides a ``staged`` reward by the task's total points, so an
