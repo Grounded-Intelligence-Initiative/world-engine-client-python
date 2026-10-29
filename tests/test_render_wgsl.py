@@ -498,14 +498,16 @@ FXC = (
 
 class PipelineAdapter:
     """An adapter whose device builds pipelines, or raises what wgpu raises
-    when FXC (D3D12) rejects a shader."""
+    when FXC (D3D12) rejects a shader, the way wgpu-py raises it: with the
+    error in a local of the raising frame, a reference cycle with that frame."""
 
     def __init__(self, choice, fails: bool):
         self.choice, self.fails = choice, fails
 
     def create_compute_pipeline(self, **kw):
         if self.fails:
-            raise GPUValidationError(FXC)
+            error = GPUValidationError(FXC)
+            raise error
         return object()
 
     def destroy(self):
@@ -1241,14 +1243,32 @@ def test_the_device_d_failed_on_goes_before_the_next_adapter_draws(
         assert opened[1]() is None
 
 
-def test_the_device_of_a_scene_d_cannot_draw_goes_before_chrome_draws(stub, chrome, monkeypatch):
+class GPUOutOfMemoryError(MemoryError):
+    """Stands in for wgpu's, from the wgpu package as wgpu's is."""
+
+
+GPUOutOfMemoryError.__module__ = "wgpu._classes"
+
+
+@pytest.mark.parametrize("why", ["asset", "memory"])
+def test_the_device_of_a_scene_d_cannot_draw_goes_before_chrome_draws(
+    stub, chrome, monkeypatch, why
+):
     """A scene renderer D cannot draw goes to the browser path; the device D
-    opened for it is freed then, not at the next collection."""
+    opened for it is freed then, not at the next collection. ``asset``: an
+    asset D does not read. ``memory``: the scene does not fit, which the core
+    says with SplatMemoryError from the GPUOutOfMemoryError that wgpu raises,
+    with the error in a local of the raising frame."""
     from world_engine_client.wgsl import render_wgsl as core
+    from world_engine_client.wgsl.budget import SplatMemoryError
 
     devices = []
 
     class Device:
+        def create_buffer(self, **kw):
+            error = GPUOutOfMemoryError("Out of Memory")
+            raise error
+
         def destroy(self):
             pass
 
@@ -1259,18 +1279,24 @@ def test_the_device_of_a_scene_d_cannot_draw_goes_before_chrome_draws(stub, chro
 
     class Undrawable:
         def __init__(self, scene_init, read, *, device, **kw):
-            raise ValueError("a mesh renderer D does not draw")
+            if why == "asset":
+                raise ValueError("a mesh renderer D does not draw")
+            try:
+                device.create_buffer(size=1 << 40)
+            except GPUOutOfMemoryError as e:
+                raise SplatMemoryError("the scene does not fit the GPU memory") from e
 
     monkeypatch.setattr(render_wgsl, "available", lambda: True)
     monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: GPU)
     monkeypatch.setattr(render_wgsl, "open_adapter", lambda choice=None, **kw: (Device(), choice))
     monkeypatch.setattr(core, "create_device", create_device)
     monkeypatch.setattr(core, "WgslRenderer", Undrawable)
+    said = "a mesh renderer D does not draw" if why == "asset" else "does not fit the GPU memory"
     with _Collections():
         env, texts = _connect_d(stub)
         try:
             assert isinstance(env.renderer, FakeChrome)
-            assert any("a mesh renderer D does not draw" in t for t in texts), texts
+            assert any(said in t for t in texts), texts
             assert len(devices) == 1 and devices[0]() is None, "D's device outlived the fallback"
         finally:
             env.close()
@@ -1305,3 +1331,116 @@ def test_close_collects_once_when_a_cycle_it_does_not_know_holds_the_device(
         assert collections.count == 1 and made[0]() is None
         renderer.close()
         assert collections.count == 1
+
+
+def test_close_while_a_render_error_is_handled_lets_the_device_go(stub, chrome, monkeypatch):
+    """A render that wgpu fails (a lost device), and close() while the caller
+    still handles the error, as a with block's exit does: the device goes
+    then, without a collection."""
+    from world_engine_client.wgsl import render_wgsl as core
+
+    made = []
+
+    class Lost(PipelineAdapter):
+        def __init__(self):
+            super().__init__(GPU, False)
+            made.append(weakref.ref(self))
+
+        def submit(self):
+            error = GPUValidationError("Parent device is lost")  # as wgpu-py raises it
+            raise error
+
+    class Core(CoreOnAnyDevice):
+        def __init__(self, scene_init, read, *, device, **kw):
+            super().__init__(scene_init, read, device=device, **kw)
+            self.device = device
+
+        def render(self, state):
+            self.device.submit()
+
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: GPU)
+    monkeypatch.setattr(render_wgsl, "open_adapter", lambda choice=None, **kw: (object(), choice))
+    monkeypatch.setattr(core, "create_device", lambda adapter: Lost())
+    monkeypatch.setattr(core, "WgslRenderer", Core)
+    env, _ = _connect_d(stub)
+    assert isinstance(env.renderer, render_wgsl.WGSLRenderer) and len(made) == 1
+    with _Collections() as collections:
+        try:
+            with env:
+                env.reset(seed=0)
+        except wec.RendererError as exc:
+            assert "device is lost" in str(exc)
+            assert made[0]() is None, "the device outlived close()"
+        else:
+            pytest.fail("the render did not fail")
+        assert collections.count == 0, "close() needed a garbage collection"
+
+
+@pytest.mark.parametrize("where", ["pipeline", "memory", "render"])
+def test_a_device_wgpu_raised_on_goes_without_a_collection(stub, d, monkeypatch, where):
+    """wgpu-py raises with the error in a local of its own frame; the cycle
+    kept the frames the error passed through, and the device in them, until
+    a collection. Here wgpu raises for real: ``pipeline``, a shader that does
+    not compile in the core's start (D fails on the adapter, and the search
+    finds no other); ``memory``, that error turned into SplatMemoryError, as
+    the core turns wgpu's GPUOutOfMemoryError; ``render``, a render's error,
+    then close() while it is handled, as a with block's exit does. The device
+    and its queue go while the caller still holds the error, the adapter when
+    it lets go of it, and no collection runs."""
+    import wgpu
+
+    from world_engine_client.wgsl import adapters
+    from world_engine_client.wgsl import render_wgsl as core
+    from world_engine_client.wgsl.budget import SplatMemoryError
+
+    def fail(device):
+        device.create_shader_module(code="fn main( {")  # wgpu-py raises GPUValidationError
+
+    made = []
+    real_create = core.create_device
+
+    def create_device(adapter, *a, **kw):
+        device = real_create(adapter, *a, **kw)
+        made.append((weakref.ref(device), weakref.ref(device.queue), weakref.ref(adapter)))
+        return device
+
+    class Core(core.WgslRenderer):
+        def __init__(self, scene_init, read, *, device, **kw):
+            if where == "pipeline":
+                fail(device)
+            if where == "memory":
+                try:
+                    fail(device)
+                except wgpu.GPUValidationError as e:
+                    raise SplatMemoryError("the scene does not fit the GPU memory") from e
+            super().__init__(scene_init, read, device=device, **kw)
+
+        def render(self, state):
+            fail(self.renderer.device)
+
+    real_find, found = render_wgsl.find_adapter, []
+
+    def find_adapter(**kw):  # after a failure the search finds the same adapter again
+        found[:] = found or [real_find(**kw)]
+        return found[0]
+
+    monkeypatch.setattr(adapters, "_failed", {})
+    monkeypatch.setattr(core, "create_device", create_device)
+    monkeypatch.setattr(core, "WgslRenderer", Core)
+    monkeypatch.setattr(render_wgsl, "find_adapter", find_adapter)
+    DPlatform(stub, encrypted=False)
+    with _Collections() as collections:
+        try:
+            with connect(stub, platform=False, renderer="wgsl") as env:
+                env.reset(seed=0)
+        except wec.RendererError as exc:
+            said = "does not fit" if where == "memory" else "Validation Error"
+            assert said in str(exc), exc
+            ((device, queue, adapter),) = made
+            alive = [name for name, ref in (("device", device), ("queue", queue)) if ref()]
+            assert alive == [], f"the {' and '.join(alive)} outlived the error"
+        else:
+            pytest.fail("wgpu raised nothing")
+        assert adapter() is None, "the adapter outlived the error"
+        assert collections.count == 0, "it took a garbage collection"

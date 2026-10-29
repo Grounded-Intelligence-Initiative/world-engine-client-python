@@ -523,8 +523,9 @@ R = rot6d_to_matrix(demo["action_dict/abs_rot_6d"][t])
   returns a full `gymnasium.Env`.
 - `RemoteEnv` is a context manager: `with we_client.connect(...) as env:`
   releases the controller lock on exit. `close()`, which the `with` block
-  calls, also frees renderer D's GPU device at once, so one process can attach
-  and release again and again without growing.
+  calls, also frees renderer D's GPU device at once, even when the block ends
+  on a rendering error, so one process can attach and release again and again
+  without growing.
 - Errors are typed (`TokenError`, `ControllerConflictError`,
   `ResetRequiredError`, `TeleopActiveError`, `BadConfigError`) and carry the
   server's "Possible fixes" hints.

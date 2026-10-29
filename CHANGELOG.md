@@ -17,7 +17,10 @@ Three fixes, and documentation.
   0.7.0 from 227 to 1,831 MiB, 66 to 146 threads and 35 to 235 file
   descriptors. The device of an adapter renderer D failed on, and of a scene
   it could not draw, also goes as soon as the next adapter or the browser
-  path takes over.
+  path takes over, wgpu's errors included: wgpu-py raises them in a
+  reference cycle with its own frame, which kept the device too. After a
+  render that wgpu failed, `close()` frees the device even while the error
+  is still being handled, as at the end of a `with` block.
 - A client without wgpu, upgraded without the render extra
   (`pip install -U digiarena`, or `pip install -U world-engine-client`
   alone), still offers the server only the browser path, and now says so:

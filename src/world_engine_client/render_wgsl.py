@@ -45,6 +45,7 @@ import struct
 import sys
 import threading
 import time
+import traceback
 import warnings
 import weakref
 from pathlib import Path
@@ -447,6 +448,7 @@ class WGSLRenderer:
         self.software = bool(self.choice.software)
         self.gpu = self.choice.label
         self.passed_over = ""  # the adapters D failed on before this one (start_renderer)
+        outer = sys.exception()  # the caller's, when it calls from an except block
         try:
             self.device = create_device(self._adapter)
             self.assets = SceneAssets(
@@ -490,8 +492,10 @@ class WGSLRenderer:
                 ) from None
             self.load_seconds = time.perf_counter() - started
         except BaseException as exc:
-            # No collection: the frames of exc hold the device until it is dropped.
-            self._close(collect=False)
+            # The frames exc passed through hold the device; without their
+            # locals it goes in close(), and not at a garbage collection.
+            _clear_frames(exc, outer)
+            self.close()
             if type(exc).__module__.split(".")[0] == "wgpu":  # a pipeline, a validation error
                 error = f"{type(exc).__name__}: {' '.join(str(exc).split())}"[:600]
                 raise PipelineError(
@@ -540,11 +544,15 @@ class WGSLRenderer:
         return ``{camera name: (H, W, 3) uint8}``."""
         if self._scene is None:
             raise RendererError("renderer is closed", code="renderer_unavailable")
+        outer = sys.exception()
         started = time.perf_counter()
         try:
             images = self._scene.render(state)
         except Exception as exc:
             if type(exc).__module__.split(".")[0] == "wgpu":  # a lost device, a GPU error
+                # so that close(), even while the caller handles this error
+                # (a with block's exit), lets the device go
+                _clear_frames(exc, outer)
                 raise RendererError(
                     f"rendering failed on {self.gpu}: {exc}", code="renderer_unavailable"
                 ) from exc
@@ -557,9 +565,6 @@ class WGSLRenderer:
     def close(self) -> None:
         """Free the scene's GPU memory, the key and the device, at once.
         Calling it again does nothing."""
-        self._close(collect=True)
-
-    def _close(self, *, collect: bool) -> None:
         scene, self._scene = self._scene, None
         device, self.device = self.device, None
         self._adapter = None
@@ -577,15 +582,34 @@ class WGSLRenderer:
                     pass
                 left = _unlink(device)
                 device = None
-                if collect and left is not None and left() is not None:
-                    if not sys.is_finalizing():
-                        gc.collect()  # a cycle _unlink does not know (another wgpu-py)
+                if left is not None and left() is not None and not sys.is_finalizing():
+                    gc.collect()  # a cycle _unlink does not know (another wgpu-py)
 
     def __enter__(self) -> WGSLRenderer:
         return self
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def _clear_frames(exc: BaseException, outer: BaseException | None) -> None:
+    """Clear the locals of the finished frames that ``exc`` passed through,
+    and of those the exceptions it chains passed through, back to ``outer``
+    (the exception the caller was handling, if any, which is left as it is).
+
+    wgpu-py raises its errors with the error in a local of the frame that
+    raises it. That reference cycle keeps every frame of the error's
+    traceback, and the device in their locals, until Python's cyclic garbage
+    collector runs."""
+    seen: set[int] = set()
+    todo: list[BaseException | None] = [exc]
+    while todo:
+        e = todo.pop()
+        if e is None or e is outer or id(e) in seen:
+            continue
+        seen.add(id(e))
+        traceback.clear_frames(e.__traceback__)  # passes over the frames still running
+        todo += (e.__cause__, e.__context__)
 
 
 def _unlink(device):
