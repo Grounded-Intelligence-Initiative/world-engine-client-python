@@ -601,6 +601,69 @@ With `normalize_reward=False`, a staged step whose info has no usable
 `task_progress.reward.max` raises `ProtocolError`, and the next step needs a
 `reset()`. A server with staged rewards always sends it.
 
+## Demonstration recordings
+
+The editor's Download Demonstrations dialog saves an HDF5 file in robomimic's
+layout: `data/demo_<k>/` with `states`, `actions`, `rewards`, `dones`, `obs/`
+and `next_obs/`. Which version of the layout a file has is in
+`data.attrs["env_args"]`, a JSON string:
+
+```python
+import json
+
+import h5py
+
+with h5py.File("demos.hdf5", "r") as f:
+    env_kwargs = json.loads(f["data"].attrs["env_args"])["env_kwargs"]
+print(env_kwargs.get("format_version"))  # None, or 3 and below: one step late
+```
+
+From format 4 on, row t of every dataset belongs to `actions[t]`, as in
+robomimic and robosuite: `obs[t]` and `states[t]` are what the action was
+chosen from, and `next_obs[t]` is what it left. In a file of format 3 or
+older, or without `format_version`, `obs[t]` and `states[t]` come after
+`actions[t]`, `next_obs[t]` is `obs[t + 1]` with the last row repeated, and
+the observation the first action was chosen from is not in the file. A
+policy trained on such a file learns each action from the observation that
+followed it.
+
+`world_engine_client.recording_realign` writes the demos of an old file to a
+new file in format 4's layout. It needs h5py, which this package does not
+install:
+
+```bash
+pip install h5py
+python -m world_engine_client.recording_realign old.hdf5 new.hdf5
+```
+
+In Python, `realign_recording("old.hdf5", "new.hdf5")` from that module does
+the same. The old file is left as it is. An existing new file is not
+replaced: the command stops, and `realign_recording` replaces it only with
+`overwrite=True`. Files of format 4 or later are refused, and so are files
+whose rows are not laid out as the old recorder wrote them, such as a file
+realigned already that still says 3 or less.
+
+Each demo loses one row. A demo of N rows becomes N − 1 rows that start one
+action later, because the observation its first action was chosen from was
+never recorded. The first row of each of `actions`, `actions_abs`,
+`action_dict/*`, `rewards`, `dones` and `task_progress` is kept, under the
+same name, in the demo's `realigned_first/`. For a demo recorded from a reset,
+reset the same way (the editor resets with seed 0), step
+`realigned_first/actions[0]`, and the world is at `states[0]`. The last row
+of the old `states`, the state after the last action, is dropped, as format
+4 keeps none; the final observation stays as the last row of `next_obs`. A
+demo of one sample has no row left: it is left out, and so is its name from
+the `mask/` lists. For a staged reward, the `paid_at_start` in
+`episode_summary` grows by the moved row's reward times `max`, so
+`sum(rewards) * max` still equals
+`earned - penalty + shaping["return"] - paid_at_start`.
+
+The new file says `format_version` 4 and `realigned_from_format_version`, the
+version it was recorded in (0 when it had none); read its other fields as
+that version's. Its demos have none of the attributes format 4 adds to say
+where a demo starts in its episode and where it paused (`start_step`,
+`reset_seed`, `gaps`): an old file does not record them.
+
 ## Development
 
 ```bash
@@ -621,6 +684,10 @@ SwiftShader. It is skipped without the `render` extra or a browser;
 shell in your `<user cache dir>/digiarena/browsers` (or `DIGIARENA_BROWSERS_DIR`)
 and never download one; `WE_TEST_BROWSER=shell` makes them use it rather than
 an installed Google Chrome.
+
+`tests/test_recording_realign.py` makes its recordings with h5py. No extra
+installs it, so run `pip install h5py` first; without h5py only its two tests
+of an h5py that does not import run.
 
 `bench/igpu/` (see its README) times renderer D against the browser path on
 this machine's GPU and compares their images with an RTX 4090's: the bench for

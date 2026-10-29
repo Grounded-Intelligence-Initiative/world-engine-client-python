@@ -2,8 +2,8 @@
 
 ## 0.7.1
 
-Scene assets straight from the platform's storage, three fixes, and
-documentation.
+Scene assets straight from the platform's storage, a helper for old
+demonstration recordings, three fixes, and documentation.
 
 - When the DigiArena platform offers it, scene assets come straight from its
   storage. A request for one says that the client follows a redirect
@@ -18,6 +18,20 @@ documentation.
   from the platform, as 0.7.0 does, and the `world_engine_client.env` logger
   says so in one INFO line. Clients up to 0.7.0 send no such header and keep
   getting the stream.
+- `python -m world_engine_client.recording_realign old.hdf5 new.hdf5` writes
+  a demonstration recording of format 3 or older (the editor's Download
+  Demonstrations) to a new file in format 4's layout; `realign_recording()`
+  in that module does the same from Python. In those files, and in files
+  without `format_version`, `obs[t]` and `states[t]` are the observation and
+  state after `actions[t]`, one step late. Format 4 has them before it, as
+  robomimic and robosuite do. Each demo starts one action later, since the
+  observation its first action was chosen from was never recorded, and keeps
+  that action's rows in `realigned_first/`; a demo of one sample is left out.
+  The new file says `format_version` 4 and `realigned_from_format_version`.
+  Files of format 4 or later, and files that were realigned already, are
+  refused, and the old file is never written to. The helper needs h5py,
+  which this package does not install (`pip install h5py`). The README's
+  "Demonstration recordings" says how to tell an old file.
 - The README and the render cache's docstrings no longer say that a scene's
   key is your account's alone. The platform can give all the accounts
   allowed to read a scene the same key, so that one copy of the scene in its
