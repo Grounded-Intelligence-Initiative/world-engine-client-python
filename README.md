@@ -647,16 +647,24 @@ Each demo loses one row. A demo of N rows becomes N − 1 rows that start one
 action later, because the observation its first action was chosen from was
 never recorded. The first row of each of `actions`, `actions_abs`,
 `action_dict/*`, `rewards`, `dones` and `task_progress` is kept, under the
-same name, in the demo's `realigned_first/`. For a demo recorded from a reset,
-reset the same way (the editor resets with seed 0), step
-`realigned_first/actions[0]`, and the world is at `states[0]`. The last row
-of the old `states`, the state after the last action, is dropped, as format
-4 keeps none; the final observation stays as the last row of `next_obs`. A
-demo of one sample has no row left: it is left out, and so is its name from
-the `mask/` lists. For a staged reward, the `paid_at_start` in
-`episode_summary` grows by the moved row's reward times `max`, so
-`sum(rewards) * max` still equals
-`earned - penalty + shaping["return"] - paid_at_start`.
+same name, in the demo's `realigned_first/`. The last row of the old
+`states`, the state after the last action, is dropped, as format 4 keeps
+none; the final observation stays as the last row of `next_obs`. A demo of
+one sample has no row left: it is left out, and so is its name from the
+`mask/` lists. For a staged reward, the `paid_at_start` in `episode_summary`
+grows by the moved row's reward times `max`, so `sum(rewards) * max` still
+equals `earned - penalty + shaping["return"] - paid_at_start`.
+
+For a demo recorded from a reset, reset the same way (the editor resets with
+seed 0), step `realigned_first/actions[0]`, and the world is at `states[0]`.
+An old file does not say which demos started at a reset. In the editor,
+Save & Next and Discard & Retry reset the scene, and the demo after either
+one usually starts there; Start Recording Session does not reset, so the
+first demo of a session usually starts later. To check a demo, connect a
+client to the scene's Simulate session with the demo's `control_mode` (see
+"Connecting to an editor Simulate session"), call `reset(seed=0)`, step
+`realigned_first/actions[0]`, and compare the observation with the demo's
+`obs[0]`.
 
 The new file says `format_version` 4 and `realigned_from_format_version`, the
 version it was recorded in (0 when it had none); read its other fields as
