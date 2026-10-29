@@ -50,7 +50,7 @@ render = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff", "Pillow>=10", "gymnasium>=1.0", "cryptography>=42"]
+dev = ["pytest>=8", "ruff", "Pillow>=10", "gymnasium>=1.0", "cryptography>=42", "h5py"]
 
 [project.urls]
 Homepage = "https://github.com/Grounded-Intelligence-Initiative/world-engine-client-python"

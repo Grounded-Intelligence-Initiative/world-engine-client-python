@@ -667,7 +667,7 @@ where a demo starts in its episode and where it paused (`start_step`,
 ## Development
 
 ```bash
-pip install -e '.[img,gym,render]' pytest && python -m pytest
+pip install -e '.[img,gym,render]' pytest h5py && python -m pytest
 ```
 
 `tests/` covers the client alone against a stub server: binary decoding, the
@@ -685,9 +685,15 @@ shell in your `<user cache dir>/digiarena/browsers` (or `DIGIARENA_BROWSERS_DIR`
 and never download one; `WE_TEST_BROWSER=shell` makes them use it rather than
 an installed Google Chrome.
 
-`tests/test_recording_realign.py` makes its recordings with h5py. No extra
-installs it, so run `pip install h5py` first; without h5py only its two tests
-of an h5py that does not import run.
+`tests/test_recording_realign.py` makes its recordings with h5py, which no
+extra installs; the install line above has it, and so does CI's test job.
+Without h5py only its tests of an h5py that is missing or does not load run.
+`world_engine_client.recording_realign` is the engine's helper for old
+recordings, but for its docstrings, its h5py import and its usage line:
+change the engine's first, then copy the change here. Before a release, run
+the test file with `WE_ENGINE_SRC` (an engine checkout): it then also
+realigns its files with both and checks that they write the same bytes and
+refuse the same files.
 
 `bench/igpu/` (see its README) times renderer D against the browser path on
 this machine's GPU and compares their images with an RTX 4090's: the bench for

@@ -17,7 +17,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       # cryptography: the cache and DAC1 tests run here too, without a renderer.
-      - run: pip install -e '.[img,gym]' pytest ruff cryptography
+      # h5py: the recording realign tests write HDF5 files. No extra installs
+      # it; the render jobs below go without it, and there those tests skip.
+      - run: pip install -e '.[img,gym]' pytest ruff cryptography h5py
       - run: ruff check .
       - run: python -m pytest
 
