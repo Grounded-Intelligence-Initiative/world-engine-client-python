@@ -1270,3 +1270,34 @@ def test_the_device_of_a_scene_d_cannot_draw_goes_before_chrome_draws(stub, chro
             assert len(devices) == 1 and devices[0]() is None, "D's device outlived the fallback"
         finally:
             env.close()
+
+
+def test_close_collects_once_when_a_cycle_it_does_not_know_holds_the_device(
+    stub, chrome, monkeypatch
+):
+    """A device that another wgpu-py keeps in a reference cycle of its own:
+    close() finds it still there after clearing what it knows, and one
+    collection frees it. Closing again does nothing."""
+    from world_engine_client.wgsl import render_wgsl as core
+
+    made = []
+
+    class Cyclic(PipelineAdapter):
+        def __init__(self):
+            super().__init__(GPU, False)
+            self.me = [self]
+            made.append(weakref.ref(self))
+
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: GPU)
+    monkeypatch.setattr(render_wgsl, "open_adapter", lambda choice=None, **kw: (object(), choice))
+    monkeypatch.setattr(core, "create_device", lambda adapter: Cyclic())
+    monkeypatch.setattr(core, "WgslRenderer", CoreOnAnyDevice)
+    env, _ = _connect_d(stub)
+    renderer = env.renderer
+    assert isinstance(renderer, render_wgsl.WGSLRenderer) and len(made) == 1
+    with _Collections() as collections:
+        env.close()
+        assert collections.count == 1 and made[0]() is None
+        renderer.close()
+        assert collections.count == 1
