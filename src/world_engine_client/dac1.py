@@ -3,8 +3,8 @@
 The hosting platform's gateway encrypts every scene asset it sends; this client
 stores the bytes exactly as they arrive and decrypts them in memory only. The
 format is specified in the engine repository (``docs/dev/dac1_format.md``). In
-short, with ``K_scene`` the 32-byte key the platform issues for one user and
-one scene:
+short, with ``K_scene`` the 32-byte key the platform issues for one scene, to
+one user or to all the users who may read the scene:
 
 * ``key_id = HMAC-SHA256(K_scene, "key-id")[:16]``;
 * ``K_file = HKDF-SHA256(ikm=K_scene, salt="", info="file" u8(version)

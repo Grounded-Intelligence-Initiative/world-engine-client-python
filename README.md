@@ -235,20 +235,21 @@ Its directories are 0700 and its files 0600. `close()` no longer deletes
 anything.
 
 The DigiArena platform sends scene assets encrypted (DAC1: AES-256-GCM under
-a key for your account and that scene). The client stores them as they
+the platform's key for that scene, which is your account's own or one shared
+by all the accounts that may read the scene). The client stores them as they
 arrive and asks the platform for the key at every connect; the key stays in
 memory. So the scene's files are never in the clear on disk, and its cache
-stops working the moment you lose access: the scene made private, your key
-revoked, or a new key epoch on the platform. The robot meshes (public MuJoCo
-Menagerie geometry) and the capture page's scripts are kept plain. A local
-`world-engine serve` sends your own scene as it is, and the cache keeps it
-plain.
+stops working the moment you lose access (the scene made private, your key
+revoked) or the platform gives the scene a new key, as it does for a new key
+epoch. The robot meshes (public MuJoCo Menagerie geometry) and the capture
+page's scripts are kept plain. A local `world-engine serve` sends your own
+scene as it is, and the cache keeps it plain.
 
 What the encryption does: it keeps the scene from someone who can read your
-disk but cannot sign in as you. It does not keep it from you. Your key
-decrypts it, and while a session runs the decrypted assets and the images
-are in the memory of this process (and of Chrome, on the browser path) and of
-the GPU.
+disk but cannot sign in to an account that may read the scene (for a public
+scene, any account). It does not keep it from you. Your key decrypts it, and
+while a session runs the decrypted assets and the images are in the memory
+of this process (and of Chrome, on the browser path) and of the GPU.
 
 Each file is checked when a session uses it, and a damaged or changed file
 is downloaded again. Processes that share the cache download a file once. A

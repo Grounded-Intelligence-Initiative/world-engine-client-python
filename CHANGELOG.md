@@ -18,6 +18,11 @@ documentation.
   from the platform, as 0.7.0 does, and the `world_engine_client.env` logger
   says so in one INFO line. Clients up to 0.7.0 send no such header and keep
   getting the stream.
+- The README and the render cache's docstrings no longer say that a scene's
+  key is your account's alone. The platform can give all the accounts
+  allowed to read a scene the same key, so that one copy of the scene in its
+  storage serves them all; the encryption then keeps a cached scene from
+  anyone who cannot sign in to such an account.
 - Renderer D frees its GPU device when the session closes. In wgpu-py 0.32 a
   device and its queue refer to each other, so up to 0.7.0 the device, its
   queue and its adapter outlived `close()` until Python's cyclic garbage

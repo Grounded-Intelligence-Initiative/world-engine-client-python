@@ -2,11 +2,13 @@
 machine, encrypted, kept between sessions.
 
 The hosting platform sends every scene asset encrypted (DAC1, see
-:mod:`world_engine_client.dac1`) under a key for your account and that scene.
-This client stores the bytes exactly as they arrive and asks the platform for
-the key at every connect; the key lives in memory only. A scene made private,
-a revoked key or a new key epoch therefore makes what is cached unreadable at
-once, and the platform's daily download limits count only real downloads.
+:mod:`world_engine_client.dac1`) under its key for that scene: your account's
+own, or one shared by all the accounts that may read the scene. This client
+stores the bytes exactly as they arrive and asks the platform for the key at
+every connect; the key lives in memory only. A scene made private, a revoked
+key or a new key for the scene (a new key epoch, say) therefore makes what is
+cached unreadable at once, and the platform's daily download limits count
+only real downloads.
 
 Where (``DIGIARENA_CACHE_DIR`` overrides; directories are 0700, files 0600)::
 
@@ -39,10 +41,11 @@ from a shell: ``python -m world_engine_client.cache ls|pin|unpin|clear|config``
 (``digiarena cache ...`` with the DigiArena SDK).
 
 What the encryption protects against: someone with access to this disk but not
-to your account, and casual browsing of the cache directory. It does not
-protect against you: your account can read the scene, so your key decrypts
-it, and the images and the decrypted assets exist in the memory of this
-process, of headless Chrome and of the GPU while a session runs.
+to an account that may read the scene (for a public scene, any account), and
+casual browsing of the cache directory. It does not protect against you: your
+account can read the scene, so your key decrypts it, and the images and the
+decrypted assets exist in the memory of this process, of headless Chrome and
+of the GPU while a session runs.
 
 :class:`SceneAssets` is the part a renderer uses: it fetches the key, makes
 sure every asset of a session is in the cache and verified, and hands out the
@@ -1054,7 +1057,8 @@ def remove_temp_dirs(*, age: float, now: float | None = None) -> tuple[int, int]
 # --------------------------------------------------------------------------- #
 @dataclass
 class SceneKey:
-    """The platform's key for this account and one scene. In memory only."""
+    """The platform's key for one scene: this account's own, or one that all
+    the accounts that may read the scene share. In memory only."""
 
     scope: str
     key_id: bytes
