@@ -55,6 +55,15 @@ _PROTO = 3
 # Seconds between heartbeats. The server drops a proto-3 controller that sends
 # nothing for 90 s (its lease).
 _HEARTBEAT_SECONDS = 30.0
+# Renderer D needs wgpu, which only the render extra installs. pip does not
+# remember extras, so an upgrade without it (pip install -U digiarena, say)
+# leaves a client that offers the server only the browser path. Each such
+# session says why in info["render"]["reason"]; one warning per process.
+_NO_WGPU = (
+    "renderer D needs the render extra, and wgpu is not installed: "
+    "pip install -U 'world-engine-client[render]'"
+)
+_warned: set[str] = set()
 
 
 def connect(
@@ -97,8 +106,10 @@ def connect(
     :class:`world_engine_client.render_wgsl.WGSLRenderer` (wgpu, no browser); an
     older one by headless Chrome (:class:`world_engine_client.render.LocalRenderer`),
     and so does a machine where no GPU or software adapter renders for D but
-    Chrome does. Without a hardware GPU they are rendered in software, with a
-    RuntimeWarning. ``render`` accepts ``"auto"`` or ``"local"`` (the same
+    Chrome does. A client without wgpu (upgraded without the render extra)
+    offers only the browser path, with a RuntimeWarning once per process that
+    gives the command. Without a hardware GPU they are rendered in software,
+    with a RuntimeWarning. ``render`` accepts ``"auto"`` or ``"local"`` (the same
     thing; kept for callers that pass it). ``render_options``: ``renderer``
     (``"auto"``, ``"wgsl"`` or ``"chrome"``; the WE_RENDERER environment
     variable sets the default), ``cache_dir``, ``scene_name``,
@@ -486,6 +497,21 @@ class RemoteEnv:
                     RuntimeWarning,
                     stacklevel=3,
                 )
+            elif protocol == 1 and not d_ok and self._render_split[2] == "auto":
+                # wgpu is missing, so renderer D was not offered; the caller did
+                # not ask for the browser path.
+                self._render_reason = _NO_WGPU
+                if "no_wgpu" not in _warned:
+                    _warned.add("no_wgpu")
+                    warnings.warn(
+                        "wgpu is not installed, so camera images come from headless Chrome "
+                        "and not from renderer D, which needs the render extra: pip install -U "
+                        "'world-engine-client[render]' (pip does not remember extras: an "
+                        "upgrade without the extra leaves wgpu out). render_options="
+                        "{'renderer': 'chrome'} keeps the browser path without this warning",
+                        RuntimeWarning,
+                        stacklevel=3,
+                    )
         if proto == 3:
             # Start before the renderer: its start can take longer than the
             # 90 s lease (a large scene rendered in software). connect() stops

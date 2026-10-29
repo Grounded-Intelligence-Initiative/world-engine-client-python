@@ -351,6 +351,62 @@ def test_renderer_chrome_offers_only_the_browser_path(stub, chrome):
         env.close()
 
 
+@pytest.fixture
+def no_wgpu(stub, chrome, monkeypatch):
+    """A client upgraded without the render extra (pip install -U digiarena):
+    Playwright from an earlier release's extra, no wgpu."""
+    from world_engine_client import env as env_module
+
+    monkeypatch.setattr(render_wgsl, "available", lambda: False)
+    monkeypatch.setattr(env_module, "_warned", set(), raising=False)
+    monkeypatch.delenv("WE_RENDERER", raising=False)
+    return DPlatform(stub)
+
+
+def _session(stub, **options):
+    """Connect, reset and close: (RuntimeWarnings, info["render"])."""
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        env = wec.connect(
+            "secret",
+            url=stub.url,
+            images=True,
+            access_provider=lambda: "scoped",
+            render_options=options or None,
+        )
+    try:
+        _, info = env.reset(seed=0)
+    finally:
+        env.close()
+    return [str(w.message) for w in log if issubclass(w.category, RuntimeWarning)], info["render"]
+
+
+def test_a_client_without_wgpu_says_why_chrome_draws(stub, no_wgpu):
+    """The client offers only the browser path. It says so once per process,
+    with the command that brings renderer D, and every session's
+    info["render"] gives the reason."""
+    upgrade = "pip install -U 'world-engine-client[render]'"
+    texts, render = _session(stub)
+    assert no_wgpu.offers[0]["render_protocols"] == [1]
+    assert render["renderer"] == "chrome"
+    assert "wgpu is not installed" in render["reason"] and upgrade in render["reason"]
+    assert len(texts) == 1, texts
+    assert "renderer D" in texts[0] and "render extra" in texts[0] and upgrade in texts[0]
+    texts, render = _session(stub)  # the next session of this process
+    assert texts == [] and upgrade in render["reason"]
+
+
+@pytest.mark.parametrize("asked", ["render_options", "WE_RENDERER"])
+def test_a_client_that_asks_for_chrome_hears_nothing_of_wgpu(stub, no_wgpu, monkeypatch, asked):
+    options = {}
+    if asked == "WE_RENDERER":
+        monkeypatch.setenv("WE_RENDERER", "chrome")
+    else:
+        options["renderer"] = "chrome"
+    texts, render = _session(stub, **options)
+    assert texts == [] and render["renderer"] == "chrome" and "reason" not in render
+
+
 def test_an_older_server_without_the_browser_path_installed(stub, monkeypatch):
     """A server from before renderer D answers protocol 1; this machine has no
     Playwright: say so, and how to fix it."""
