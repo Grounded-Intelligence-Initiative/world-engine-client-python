@@ -2,8 +2,9 @@
 
 This directory is the only WGSL source of renderer D (design doc 16 §9). The
 Python host (`world_engine/renderer/wgsl/`, which world-engine-client ships a
-copy of together with these files), the browser host (M-D4) and a Node+Dawn
-test host all load these files unchanged. M-D1 made the splat pass; M-D2 the
+copy of together with these files), the browser host (`../wgslRenderer.ts`,
+the editor's Policy View, M-D4) and a Node+Dawn test host all load these files
+unchanged. M-D1 made the splat pass; M-D2 the
 mesh pass (three.js's MeshStandardMaterial as the capture page draws it), the
 key light's shadow map, and the environment prefilter (three's
 PMREMGenerator); M-D3 the colour target above 8 bits and its resolve.
@@ -74,9 +75,14 @@ which the splats then blend over.
 Vertex buffer, one interleaved stream of 80 bytes: position (f32x3, location 0),
 normal (f32x3, 1; zero for flat-shaded meshes), uv (f32x2, 2), uv1 (f32x2, 3),
 colour (f32x4, 4; linear, ones without COLOR_0), tangent (f32x4, 5; zero without
-TANGENT), owner index (u32, 6). The owner's scale is in the vertices (normals
-divided by it, triangles reversed for a mirroring scale, as three flips the
-front face); the owner array holds the rest of the world matrix.
+TANGENT), owner index (u32, 6). The Python host puts the owner's scale in the
+vertices (normals divided by it, triangles reversed for a mirroring scale, as
+three flips the front face) and the owner array holds the rest of the world
+matrix. The browser host keeps the scale in the owner's matrix, so an editor
+drag that scales an object does not rebuild the vertex buffer: the inverse
+transpose in the owner array divides the normals by it, and the triangles of a
+mirrored owner are reversed as above. Both give the gym's image
+(`tests/test_editor_policy_view.py`).
 
 Bindings of `mesh`: group 0: `cams` (the splat pass's camera array), the
 `Dispatch` slot of the camera (dynamic offset, `D.cam`), `owners` (storage: per
@@ -102,9 +108,11 @@ proxy boxes among them, then the robot links, then the end-effector box; a
 GLB's materials in order of first use), and the draws of a material without
 depth writes one primitive at a time, per camera, by the depth of the
 primitive's centre along the view direction, nearest first (three's z; WEM1
-records the centre GLTFLoader's bounding sphere has). The index buffer is laid
-out for the shadow pass instead (casters by culling mode, then material), so
-the camera pass draws each material's range out of that order.
+records the centre GLTFLoader's bounding sphere has; the browser host scales
+the centre by the owner's scale of that frame, as the Python host's baked
+vertices are). The index buffer is laid out for the shadow pass instead
+(casters by culling mode, then material), so the camera pass draws each
+material's range out of that order.
 
 Shadow map (`shadow.wgsl`): one per frame, before the cameras, shared by all of
 them. three's DirectionalLightShadow with the editor's quality-tier settings:
@@ -215,6 +223,73 @@ adapters differ by 0.10/255. On an RTX 4090 `rgba16float` costs 1.17 times the
 8-bit draw pass (0.19 ms for three 256² cameras of the room); `rgb10a2unorm`
 1.45 and `rgba32float` 6.4 times. A host may draw into `rgba8unorm` directly
 and skip the resolve (`color_format`), for measurements.
+
+## Browser host
+
+The editor's host (M-D4) is TypeScript on the browser's WebGPU, a port of the
+Python host that gives the same bytes on the same GPU:
+
+| file | does | Python host |
+|---|---|---|
+| `wgslSources.ts` | imports this directory raw at build time and joins each module's files | `load_pipeline` |
+| `wgslBudget.ts` | the bindings split | `budget.py` |
+| `wgslSplats.ts` | the PLY to the geometry and SH arrays, rounded as numpy rounds (float32 products, f16 round to nearest even); in a worker | `splat_data.py` |
+| `gltfScene.ts`, `wgslMeshScene.ts` | the mesh arrays from what three's GLTFLoader parsed, so an object imported a moment ago draws | `wem1.py`, `mesh_data.py` |
+| `wgslLighting.ts`, `wgslMeshPass.ts` | the environment, the shadow map and the mesh pass | `lighting.py`, `mesh_pass.py` |
+| `wgslRenderer.ts` | the passes, one camera per batch, into the colour target and its resolve | `render_wgsl.py` |
+| `wgslWorkers.ts`, `wgslSplatsWorker.ts`, `wgslMipsWorker.ts` | the scan's preparation and texture mip chains off the main thread, the same code as on it | |
+| `wgslHost.ts` | all of the above as one chunk, which the editor loads only once it has WebGPU | |
+| `wgslPipelineId.ts` | the pipeline version this host speaks, which the editor compares with the server's `features.gym_renderer` without loading the shaders | |
+
+The editor builds the scene again whenever an item comes, goes or is renamed,
+a scale mirrors, or the scan's Align changes, so the host keeps what does not
+change and spreads the rest over frames: each object's GLB is read once (by
+its GLTFLoader scene) and the scene is put together from those parts; each
+image is decoded once (by its three Source) and mipmapped in a worker; a
+texture stays on the GPU across mesh passes until no object uses it, and new
+ones are uploaded one per frame; the scan's bytes go to the splat worker once,
+a 16 MiB piece a frame, and a new placement is one message; splat buffers are
+written about 8 MiB per frame. None of this changes a byte: the worker runs
+the main thread's code. While a scene is being built the editor draws its
+views with Spark, never with D's stale scene. A mechanism's parts come from the
+editor's items as `scene_init` has them (`../../editor/policyParts.ts`): a
+part's GLB at its part frame times its offset times its scale, grey boxes of
+its collider for a part without one, belts whose maps scroll by the state's
+travel.
+
+The mesh arrays must be what WEM1 gives the Python host for the same GLB:
+vertex records word for word (GLTFLoader's world matrix applied per primitive,
+normals by its inverse transpose, -0 written as the +0 the Python host's
+matrix products give), indices, draw ranges, material uniforms and each map
+slot's image (`tests/test_editor_policy_meshes.py`). A host that builds its
+arrays some other way must pass that test.
+
+The browser host asks for a `high-performance` adapter with the default
+limits and refuses a fallback adapter (SwiftShader): the editor keeps Spark
+then. A test switch lets it draw on the fallback adapter, to cover the CPU
+class. It picks the colour target by adapter class as the Python host does
+(`defaultColorFormat`, `deviceFeatures` in `../wgslRenderer.ts`): `rgba16float`
+and no optional feature on a GPU; `float32-blendable` and `rgba32float` on a
+CPU adapter that has it, else `rgb10a2unorm`. The bake draws into the same
+target. A lost device or an uncaptured error stops it the way a refused
+adapter does. Each camera's resolve (`rgba8unorm`) is copied into its canvas
+(`rgba8unorm`, alpha mode `opaque`, usage `RENDER_ATTACHMENT | COPY_SRC |
+COPY_DST`), so the canvas holds the bytes a readback gives; nothing is read
+back per frame.
+
+The bake's sizes do not follow the editor's canvas: both hosts size the bake's
+splats as Spark does on the capture page's 1280 x 720 canvas and cap them at
+256 px (`BAKE_RENDER_SIZE`, `BAKE_MAX_PIXEL_RADIUS` in `wgslLighting.ts`).
+
+The images both hosts must agree on are in `tests/data/<golden>/ref_wgsl*`
+(made by `scripts/wgsl/make_preview_refs.py` with the Python host): the
+render_state of the golden scenes, the same scene scaled unevenly and mirrored,
+the scan with nothing else, and an HDRI. Their `meta.json` records the Python
+host's colour target and the bake's light probe, which the editor's tests check
+too. `tests/test_editor_policy_view.py` holds the editor to them for the state
+the gym renders and for the editor's own state of a layout. A pipeline change
+that moves the Python host's images must move this host's in the same commit,
+and the references are made again with it.
 
 ## Determinism
 

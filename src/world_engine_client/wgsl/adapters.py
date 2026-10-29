@@ -735,7 +735,19 @@ def nvidia_hint() -> str:
     )
 
 
-def software_message(choice: AdapterChoice) -> str:
+def software_message(choice: AdapterChoice, requested: bool = False) -> str:
+    """The warning for camera images on a software adapter. ``requested``: the
+    caller asked for one (adapter="software"), so whether this machine has a
+    GPU, and how Vulkan would reach it, is not news to them."""
+    if requested:
+        msg = (
+            f"rendering camera images on the CPU with {choice.label}, as asked (adapter "
+            "'software'). Expect a step or two per second on real scenes; pass images=False "
+            "for a state-only session"
+        )
+        if choice.step == "swiftshader":
+            msg += ", or apt install mesa-vulkan-drivers for a faster CPU renderer (lavapipe)"
+        return msg
     seen = gpu_devices()
     nvidia = nvidia_present()
     if seen:
@@ -766,13 +778,14 @@ def software_message(choice: AdapterChoice) -> str:
     return msg
 
 
-def slow_message(choice: AdapterChoice, rate: float, steps: int) -> str:
+def slow_message(choice: AdapterChoice, rate: float, steps: int, requested: bool = False) -> str:
+    """``requested``: the software adapter was asked for (software_message)."""
     msg = (
         f"camera rendering is slower than real time here: {rate:.1f} steps/s over {steps} "
         f"steps on {choice.label}, below {REAL_TIME_STEPS:.1f} steps/s (one step is 0.034 s). "
         "Pass images=False for a state-only session, or render fewer or smaller cameras"
     )
-    if choice.software and nvidia_present():
+    if choice.software and not requested and nvidia_present():
         msg += ". " + nvidia_hint()[0].upper() + nvidia_hint()[1:]
     return msg
 
@@ -795,8 +808,11 @@ class SpeedCheck:
     """Times renders after a warm-up; one warning per process when the median
     rate is below real time."""
 
-    def __init__(self, choice: AdapterChoice, skip: int = 3, samples: int = 10):
+    def __init__(
+        self, choice: AdapterChoice, skip: int = 3, samples: int = 10, requested: bool = False
+    ):
         self.choice, self.skip, self.samples = choice, skip, samples
+        self.requested = requested  # the software adapter was asked for
         self.seconds: list[float] = []
         self.rate: float | None = None
 
@@ -811,4 +827,8 @@ class SpeedCheck:
         median = timed[mid] if len(timed) % 2 else 0.5 * (timed[mid - 1] + timed[mid])
         self.rate = 1.0 / median if median > 0 else float("inf")
         if self.rate < REAL_TIME_STEPS:
-            warn_once("slow", slow_message(self.choice, self.rate, self.samples), stacklevel=4)
+            warn_once(
+                "slow",
+                slow_message(self.choice, self.rate, self.samples, self.requested),
+                stacklevel=4,
+            )
