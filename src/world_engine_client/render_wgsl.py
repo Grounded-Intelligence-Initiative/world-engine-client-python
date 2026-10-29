@@ -196,8 +196,30 @@ def open_adapter(
         except adapters.NoAdapterError as exc:
             raise _no_adapter(exc, allow_software) from None
     if choice.software and warn:
-        adapters.warn_once("software", adapters.software_message(choice), stacklevel=4)
+        adapters.warn_once("software", _software_message(choice, adapter), stacklevel=4)
     return found, choice
+
+
+def _asked_for(adapter: str) -> bool:
+    """True when ``adapter`` asks for a software adapter, or names one."""
+    return isinstance(adapter, str) and (adapter == "software" or adapter.startswith("name:"))
+
+
+def _software_message(choice, adapter: str) -> str:
+    """The warning for a software adapter. When the caller asked for one, it
+    says that, not that Vulkan reaches no GPU (the search did not look for one)."""
+    from .wgsl import adapters
+
+    if not _asked_for(adapter):
+        return adapters.software_message(choice)
+    msg = (
+        f"rendering camera images on the CPU with {choice.label}, as adapter={adapter!r} "
+        "asks. Expect a step or two per second on real scenes; pass images=False for a "
+        "state-only session"
+    )
+    if choice.step == "swiftshader":
+        msg += ", or apt install mesa-vulkan-drivers for a faster CPU renderer (lavapipe)"
+    return msg
 
 
 def start_renderer(
@@ -421,6 +443,7 @@ class WGSLRenderer:
                 timeout=min(float(timeout), 120.0),
             )
         self._adapter, self.choice = opened
+        self._prefer = adapter  # info["render"]["reason"] says when it asks for software
         self.software = bool(self.choice.software)
         self.gpu = self.choice.label
         self.passed_over = ""  # the adapters D failed on before this one (start_renderer)
@@ -501,7 +524,9 @@ class WGSLRenderer:
         if self._scene is not None:
             out["lighting"] = self._scene.info.get("lighting")
         reasons = [self.passed_over] if self.passed_over else []
-        if c.software:
+        if c.software and _asked_for(self._prefer):
+            reasons.append(f"adapter={self._prefer!r} asks for a software adapter")
+        elif c.software:
             failed = [f"{t['step']}: {t.get('error')}" for t in c.trail if not t.get("ok")]
             reasons.append("; ".join(failed) or "no hardware adapter")
         if reasons:

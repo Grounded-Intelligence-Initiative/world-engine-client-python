@@ -676,6 +676,58 @@ def test_a_software_adapter_warns_once_per_process(monkeypatch, tmp_path):
     assert seen[0]["cache_file"] == tmp_path / "adapters.json", "kept next to the render cache"
 
 
+@pytest.mark.parametrize("adapter", ["auto", "software", "name:llvmpipe"])
+def test_the_software_warning_says_what_the_caller_asked_for(monkeypatch, tmp_path, adapter):
+    """The search falls back to a software adapter when Vulkan reaches no GPU,
+    and the warning says so. A software adapter the caller asked for (adapter
+    "software", or one by name) is no such case: its warning says that D
+    draws on the CPU, and how fast, and nothing of a GPU."""
+    from world_engine_client.wgsl import adapters
+
+    choice = adapters.AdapterChoice(
+        step="lavapipe", device="llvmpipe", adapter_type="CPU", backend="Vulkan", software=True
+    )
+    monkeypatch.setattr(adapters, "open_adapter", lambda **kw: (object(), choice))
+    monkeypatch.setattr(adapters, "_warned", set())
+    monkeypatch.setattr(adapters, "gpu_devices", lambda: ["/dev/dri/renderD128"])
+    monkeypatch.setattr(adapters, "nvidia_present", lambda: False)
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        render_wgsl.open_adapter(adapter=adapter, cache_dir=tmp_path)
+    (text,) = [str(w.message) for w in log if issubclass(w.category, RuntimeWarning)]
+    assert "on the CPU with llvmpipe" in text and "a step or two per second" in text
+    assert "images=False" in text
+    if adapter == "auto":
+        assert "Vulkan reaches no GPU here, though this machine shows /dev/dri/renderD128" in text
+    else:
+        assert f"as adapter={adapter!r} asks" in text and "GPU" not in text, text
+
+
+def test_info_says_the_caller_asked_for_the_software_adapter(stub, chrome, monkeypatch):
+    """info["render"]["reason"] says that the caller asked for the software
+    adapter, not that there is no hardware one."""
+    from world_engine_client.wgsl import render_wgsl as core
+
+    lavapipe = _choice("lavapipe", "llvmpipe (LLVM 15.0.7, 256 bits)", "CPU", True)
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: lavapipe)
+    monkeypatch.setattr(
+        render_wgsl,
+        "open_adapter",
+        lambda choice=None, **kw: (PipelineAdapter(choice, False), choice),
+    )
+    monkeypatch.setattr(core, "create_device", lambda adapter: adapter)
+    monkeypatch.setattr(core, "WgslRenderer", CoreOnAnyDevice)
+    env, _ = _connect_d(stub, adapter="software")
+    try:
+        assert isinstance(env.renderer, render_wgsl.WGSLRenderer)
+        _, info = env.reset(seed=0)
+        assert info["render"]["software"] is True
+        assert info["render"]["reason"] == "adapter='software' asks for a software adapter"
+    finally:
+        env.close()
+
+
 def test_the_adapter_search_keeps_its_result_in_a_private_cache(monkeypatch, tmp_path):
     """The adapter cache sits in the render cache's directory: created for this
     user only, like the render cache creates it, before anything is written."""
