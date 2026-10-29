@@ -33,8 +33,9 @@ Three fixes, and documentation.
   warning says that renderer D draws on the CPU as asked, and how fast. It
   used to say that Vulkan reaches no GPU, and on a machine whose NVIDIA GPU
   Vulkan does reach it said to install the libraries the NVIDIA Vulkan driver
-  loads. `info["render"]["reason"]` says the adapter was asked for, not "no
-  hardware adapter".
+  loads. The warning for rendering slower than real time gave the same NVIDIA
+  advice; for these callers it now leaves it out. `info["render"]["reason"]`
+  says the adapter was asked for, not "no hardware adapter".
 
 The README and the docstrings now cover what an engine with mobile bases and
 several robots sends, which 0.7.0 already handles. The numbers below were

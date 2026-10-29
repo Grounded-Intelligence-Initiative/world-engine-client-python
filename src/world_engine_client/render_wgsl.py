@@ -37,6 +37,7 @@ assets, Pillow for mesh textures): ``pip install 'world-engine-client[render]'``
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 import json
 import os
@@ -221,6 +222,18 @@ def _software_message(choice, adapter: str) -> str:
     if choice.step == "swiftshader":
         msg += ", or apt install mesa-vulkan-drivers for a faster CPU renderer (lavapipe)"
     return msg
+
+
+def _speed_check(choice, adapter: str):
+    """The vendored SpeedCheck for a session on ``choice``. For a software
+    adapter the caller asked for, its warning leaves out the hint that Vulkan
+    does not reach this machine's NVIDIA GPU, as _software_message does: the
+    vendored slow_message reads ``choice.software`` only to add that hint."""
+    from .wgsl import adapters
+
+    if choice.software and _asked_for(adapter):
+        choice = dataclasses.replace(choice, software=False)
+    return adapters.SpeedCheck(choice)
 
 
 def start_renderer(
@@ -428,7 +441,6 @@ class WGSLRenderer:
         color_format: str | None = None,
         opened=None,
     ):
-        from .wgsl import adapters
         from .wgsl.budget import SplatMemoryError
         from .wgsl.render_wgsl import WgslRenderer, create_device
 
@@ -504,7 +516,7 @@ class WGSLRenderer:
                     error=error,
                 ) from exc
             raise
-        self._speed = adapters.SpeedCheck(self.choice)
+        self._speed = _speed_check(self.choice, adapter)
         self.last_timings: dict = {}
 
     def _read(self, url: str):

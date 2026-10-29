@@ -1,5 +1,5 @@
 {
- "made": "2026-10-29T05:47:54-0400",
+ "made": "2026-10-29T05:52:19-0400",
  "images": [
   [
    0,
@@ -24,10 +24,10 @@
  ],
  "made_with": {
   "world-engine-client": "0.7.1",
-  "git": "v0.7.0-8-g69e061c-dirty",
-  "renderer_d": "21301600bb0a8d0284e7380010a5e687d5cae7dccd96c6732410264170e82a06",
+  "git": "v0.7.0-9-ge565508-dirty",
+  "renderer_d": "25a4b535a8525d367abfc94d49237fa511b4b86b1551154c3c4b4e5c84c8bb57",
   "matches_checkout": true,
-  "spark_kept_from": "2026-10-29T02:32:14-0400"
+  "spark_kept_from": "2026-10-29T05:47:54-0400"
  },
  "sets": {
   "r2_400k": {
@@ -68,7 +68,7 @@
      "lighting": "scene",
      "vendor": "NVIDIA",
      "description": "580.178.04",
-     "search_seconds": 1.452,
+     "search_seconds": 1.38,
      "cached": false,
      "trail": [
       {
@@ -80,7 +80,7 @@
        ],
        "picked": "NVIDIA GeForce RTX 4090",
        "error": null,
-       "seconds": 1.451,
+       "seconds": 1.38,
        "import_error": null
       }
      ]
@@ -149,7 +149,7 @@
      "lighting": "scene",
      "vendor": "NVIDIA",
      "description": "580.178.04",
-     "search_seconds": 1.452,
+     "search_seconds": 1.38,
      "cached": true,
      "trail": [
       {
@@ -161,7 +161,7 @@
        ],
        "picked": "NVIDIA GeForce RTX 4090",
        "error": null,
-       "seconds": 1.451,
+       "seconds": 1.38,
        "import_error": null
       }
      ]

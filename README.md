@@ -146,13 +146,14 @@ software adapter, one `RuntimeWarning` says so;
 expect about a step per second on a real scene. A second warning comes after a
 warm-up when the rendering is slower than real time (29.4 steps per second, one
 step per 0.034 s), naming the adapter, its type and the measured rate. On a
-machine with an NVIDIA GPU that Vulkan cannot reach, the warning says to
+machine with an NVIDIA GPU that Vulkan cannot reach, both warnings say to
 install `libx11-6 libxext6 libegl1` and, in a container, to add `graphics` to
 `NVIDIA_DRIVER_CAPABILITIES`. A software adapter you ask for (an `adapter` of
-`"software"`, or a software adapter by name) gets a warning that says only
-that the CPU draws, as asked, and how fast; `info["render"]["reason"]` says
-it was asked for. The probes import wgpu from where your process
-does (its `sys.path`), so `pip install --user` and `PYTHONPATH` installs work.
+`"software"`, or a software adapter by name) gets them without that advice:
+the first says only that the CPU draws, as asked, and how fast, and
+`info["render"]["reason"]` says it was asked for. The probes import wgpu from
+where your process does (its `sys.path`), so `pip install --user` and
+`PYTHONPATH` installs work.
 
 A Linux machine can show a GPU (a `/dev/dri/renderD*` node, `/dev/nvidiactl`)
 that Vulkan does not reach: a GPU without its Vulkan driver

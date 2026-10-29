@@ -730,6 +730,50 @@ def test_info_says_the_caller_asked_for_the_software_adapter(stub, chrome, monke
         env.close()
 
 
+@pytest.mark.parametrize("adapter", ["auto", "software", "name:llvmpipe"])
+def test_the_slow_warning_says_what_the_caller_asked_for(stub, chrome, monkeypatch, adapter):
+    """Rendering below real time gets one more warning. On a machine with an
+    NVIDIA GPU, after the search fell back to a software adapter, it adds that
+    Vulkan does not reach the GPU, and how to fix that. For a software adapter
+    the caller asked for, it is the same warning without that hint: the
+    search did not look for a GPU."""
+    from world_engine_client.wgsl import adapters
+    from world_engine_client.wgsl import render_wgsl as core
+
+    lavapipe = _choice("lavapipe", "llvmpipe (LLVM 15.0.7, 256 bits)", "CPU", True)
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: lavapipe)
+    monkeypatch.setattr(render_wgsl, "chrome_may_be_faster", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        render_wgsl,
+        "open_adapter",
+        lambda choice=None, **kw: (PipelineAdapter(choice, False), choice),
+    )
+    monkeypatch.setattr(core, "create_device", lambda adapter: adapter)
+    monkeypatch.setattr(core, "WgslRenderer", CoreOnAnyDevice)
+    monkeypatch.setattr(adapters, "_warned", set())
+    monkeypatch.setattr(adapters, "nvidia_present", lambda: True)
+    monkeypatch.setattr(adapters, "REAL_TIME_STEPS", 1e9)  # every render is slower
+    env, _ = _connect_d(stub, adapter=adapter)
+    try:
+        with warnings.catch_warnings(record=True) as log:
+            warnings.simplefilter("always")
+            env.reset(seed=0)
+            for _ in range(13):  # 3 to warm up, 10 timed
+                env.step([0.0] * env.action_dim)
+        rate = env.renderer._speed.rate
+    finally:
+        env.close()
+    (text,) = [str(w.message) for w in log if issubclass(w.category, RuntimeWarning)]
+    assert "slower than real time" in text and "on llvmpipe" in text and "images=False" in text
+    if adapter == "auto":
+        assert "This machine has an NVIDIA GPU that Vulkan does not reach" in text, text
+    else:
+        assert "NVIDIA" not in text and "does not reach" not in text, text
+        monkeypatch.setattr(adapters, "nvidia_present", lambda: False)
+        assert text == adapters.slow_message(lavapipe, rate, 10), "the vendored text, no hint"
+
+
 def test_the_adapter_search_keeps_its_result_in_a_private_cache(monkeypatch, tmp_path):
     """The adapter cache sits in the render cache's directory: created for this
     user only, like the render cache creates it, before anything is written."""
