@@ -52,6 +52,11 @@ import sys
 
 import numpy as np
 
+# The engine's helper for old recordings, but for the docstrings, the h5py
+# import (_h5py, and the ImportError that main catches) and main's usage line.
+# A change goes into the engine first, then here: with WE_ENGINE_SRC,
+# tests/test_recording_realign.py checks that both write and refuse the same.
+
 # The first version whose obs and states come before the action.
 ALIGNED_FORMAT_VERSION = 4
 # A demo's datasets read before the action; every other per-step dataset
@@ -234,12 +239,15 @@ def _text(value) -> str:
 
 
 def _h5py():
-    """h5py, which world-engine-client does not depend on. Without it, an
-    ImportError that says how to install it; an h5py that is installed but
-    does not import raises its own error."""
+    """h5py, which world-engine-client does not depend on. If Python finds no
+    h5py (ModuleNotFoundError), an ImportError that says how to install it.
+    An h5py that is found but does not load raises its own error: one built
+    for another Python, whose compiled part this Python skips, raises an
+    ImportError named h5py too, and pip install h5py would only answer that
+    it is installed."""
     try:
         import h5py
-    except ImportError as exc:
+    except ModuleNotFoundError as exc:
         if exc.name != "h5py":
             raise
         raise ImportError(
