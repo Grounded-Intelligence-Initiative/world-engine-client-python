@@ -35,6 +35,7 @@ import logging
 import math
 import re
 import select
+import socket
 import threading
 import time
 import urllib.parse
@@ -71,8 +72,9 @@ _warned: set[str] = set()
 # The platform may answer a request for a scene asset with a redirect to its
 # storage: a presigned URL, valid for minutes (RemoteEnv._open_stored).
 _REDIRECTS = (301, 302, 303, 307, 308)
-# Seconds to connect to that storage, TLS included. Where a network drops the
-# packets, an env waits this long once, then has the platform stream.
+# Seconds to connect to that storage, for all the addresses of its name and TLS
+# included (_connect_within). Where a network drops the packets, an env waits
+# this long once, then has the platform stream.
 _STORAGE_CONNECT_SECONDS = 10.0
 # Its host as urlsplit gives it: a name in lower case or an IP address.
 _STORAGE_HOST = re.compile(r"[a-z0-9.:-]+")
@@ -869,6 +871,7 @@ class RemoteEnv:
                 transport.default_port if port is None else port,
                 timeout=_STORAGE_CONNECT_SECONDS,
             )
+            conn._create_connection = _connect_within  # http.client's hook for the socket
             conn.connect()
             conn.sock.settimeout(max(self._timeout, 60))  # each piece, as from the platform
             conn.request("GET", target, headers=sent)
@@ -993,3 +996,34 @@ def _storage_url(location: str, *, https: bool) -> tuple[str, str, int | None, s
     ):
         raise ValueError("an unusable URL")
     return url.scheme, host, port, target
+
+
+def _connect_within(address, timeout, source_address=None):
+    """socket.create_connection, but ``timeout`` is for the whole connect and
+    not for each address of the name: each address gets an equal part of
+    what is left, and the socket keeps the rest for the TLS handshake."""
+    deadline = time.monotonic() + timeout
+    infos = socket.getaddrinfo(*address, 0, socket.SOCK_STREAM)
+    errors: list[OSError] = []
+    for n, (family, kind, proto, _, addr) in enumerate(infos):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        sock = None
+        try:
+            sock = socket.socket(family, kind, proto)
+            sock.settimeout(left / (len(infos) - n))
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(addr)
+        except OSError as exc:
+            if sock is not None:
+                sock.close()
+            errors.append(exc)
+            continue
+        sock.settimeout(max(deadline - time.monotonic(), 0.001))
+        return sock
+    try:
+        raise errors[-1] if errors else TimeoutError("timed out")
+    finally:
+        errors.clear()  # the exceptions refer to this frame

@@ -266,10 +266,12 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def resolve(monkeypatch, names: dict[str, list[tuple[str, int]]]) -> list[tuple[str, int]]:
+def resolve(monkeypatch, names: dict[str, list]) -> list[tuple[str, int]]:
     """socket.getaddrinfo with each of ``names`` resolved to its loopback
-    addresses, in that order, whatever the port; other names as before.
-    Returns the (host, port) of each lookup of one of them."""
+    addresses, in that order, whatever the port; other names as before. An
+    address given as None is one the system opens no socket for (as an IPv6
+    one where IPv6 is off). Returns the (host, port) of each lookup of one of
+    them."""
     real = socket.getaddrinfo
     asked = []
 
@@ -277,7 +279,12 @@ def resolve(monkeypatch, names: dict[str, list[tuple[str, int]]]) -> list[tuple[
         if host not in names:
             return real(host, port, *args, **kwargs)
         asked.append((host, port))
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", a) for a in names[host]]
+        return [
+            (socket.AF_UNIX, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", "/nowhere")
+            if a is None
+            else (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", a)
+            for a in names[host]
+        ]
 
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     return asked
@@ -536,6 +543,95 @@ def test_an_ipv6_address_without_a_port(stub, storage, direct, tmp_path, monkeyp
     assert asked == [(host, 80)]
     [got] = storage.requests
     assert got.status == 200 and got.headers["Host"] == f"[{host}]"
+    assert asks(stub, url) == [(True, None)]
+    assert switch_lines(caplog) == [] and resumes(caplog) == []
+
+
+def test_the_connect_timeout_is_for_all_of_the_names_addresses(
+    stub, storage, direct, tmp_path, monkeypatch, caplog
+):
+    """Storage under a name with four addresses (R2's names have two IPv4 and
+    two IPv6 ones), all of which drop the packets: the env gives up when the
+    connect timeout (10 s, 0.6 s here) is over, not after it per address,
+    and streams from then on."""
+    caplog.set_level(logging.INFO, logger="world_engine_client")
+    full = _full_listener()
+    if full is None:
+        pytest.skip("this system refuses connections past a full listen queue")
+    server, held = full
+    asked = resolve(monkeypatch, {"storage.test": [server.getsockname()] * 4})
+    monkeypatch.setattr(env_module, "_STORAGE_CONNECT_SECONDS", 0.6)
+    direct.base = "http://storage.test"
+    env = connect(stub)
+    try:
+        started = time.monotonic()
+        assets = download(env, tmp_path)
+        took = time.monotonic() - started
+        for u in URLS:
+            assert assets.read(u) == ASSETS[u]
+    finally:
+        env.close()
+        for s in [server, *held]:
+            s.close()
+    assert asked == [("storage.test", 80)]
+    assert 0.6 <= took < 1.5, took
+    assert asks(stub, URLS[0]) == [(True, None), (False, None)]
+    assert all(asks(stub, u) == [(False, None)] for u in URLS[1:])
+    [line] = switch_lines(caplog)
+    assert "cannot be reached" in line and "timed out" in line
+    assert resumes(caplog) == []
+
+
+def test_an_address_that_drops_the_packets_leaves_time_for_the_next(
+    stub, storage, direct, tmp_path, monkeypatch, caplog
+):
+    """Of a name's two addresses the first drops the packets and the second
+    is storage: the first gets half of the connect timeout (3 s here), and
+    the file comes from storage."""
+    caplog.set_level(logging.INFO, logger="world_engine_client")
+    full = _full_listener()
+    if full is None:
+        pytest.skip("this system refuses connections past a full listen queue")
+    server, held = full
+    resolve(monkeypatch, {"storage.test": [server.getsockname(), storage.server.server_address]})
+    monkeypatch.setattr(env_module, "_STORAGE_CONNECT_SECONDS", 3.0)
+    direct.base = "http://storage.test"
+    url = "/__asset/0.ply"
+    env = connect(stub)
+    try:
+        started = time.monotonic()
+        assets = download(env, tmp_path, [url])
+        took = time.monotonic() - started
+        assert assets.read(url) == ASSETS[url]
+    finally:
+        env.close()
+        for s in [server, *held]:
+            s.close()
+    assert 1.5 <= took < 2.4, took
+    [got] = storage.requests
+    assert got.status == 200 and got.path == direct.object(url)
+    assert asks(stub, url) == [(True, None)]
+    assert switch_lines(caplog) == [] and resumes(caplog) == []
+
+
+def test_an_address_the_system_opens_no_socket_for_is_passed_over(
+    stub, storage, direct, tmp_path, caplog, monkeypatch
+):
+    """The name's first address is of a kind this system opens no socket for
+    (an IPv6 address where IPv6 is off): the client goes on to the next one,
+    as socket.create_connection does, and the file comes from storage."""
+    caplog.set_level(logging.INFO, logger="world_engine_client")
+    resolve(monkeypatch, {"storage.test": [None, storage.server.server_address]})
+    direct.base = "http://storage.test"
+    url = "/__asset/0.ply"
+    env = connect(stub)
+    try:
+        assets = download(env, tmp_path, [url])
+        assert assets.read(url) == ASSETS[url]
+    finally:
+        env.close()
+    [got] = storage.requests
+    assert got.status == 200 and got.path == direct.object(url)
     assert asks(stub, url) == [(True, None)]
     assert switch_lines(caplog) == [] and resumes(caplog) == []
 
