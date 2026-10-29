@@ -859,29 +859,38 @@ class RemoteEnv:
             self._storage_failed(f"the platform redirected to {exc}", at_once=True)
             return None
         transport = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
-        conn = transport(host, port, timeout=_STORAGE_CONNECT_SECONDS)
         sent = {k: v for k, v in (headers or {}).items() if k.lower() == "range"}
+        conn = None
         try:
+            # With a port, http.client takes the host as it is. Without one it
+            # would take an IPv6 address's last group for the port.
+            conn = transport(
+                host,
+                transport.default_port if port is None else port,
+                timeout=_STORAGE_CONNECT_SECONDS,
+            )
             conn.connect()
             conn.sock.settimeout(max(self._timeout, 60))  # each piece, as from the platform
             conn.request("GET", target, headers=sent)
             response = conn.getresponse()
         except (http.client.InvalidURL, ValueError):  # their messages hold the URL
-            conn.close()
-            self._storage_failed("the platform redirected to an unusable URL", at_once=True)
-            return None
+            why = "the platform redirected to an unusable URL"
         except (OSError, http.client.HTTPException) as exc:
-            conn.close()
-            self._storage_failed(f"storage at {host} cannot be reached: {exc!r}", at_once=True)
-            return None
+            why = f"storage at {host} cannot be reached: {exc!r}"
         except BaseException:
-            conn.close()
+            if conn is not None:
+                conn.close()
             raise
-        if response.status not in (200, 206):
+        else:
+            if response.status in (200, 206):
+                return _Stored(response, conn, self, host)
             conn.close()
             self._storage_failed(f"storage at {host} answered HTTP {response.status}")
             return None
-        return _Stored(response, conn, self, host)
+        if conn is not None:
+            conn.close()
+        self._storage_failed(why, at_once=True)
+        return None
 
     def _storage_failed(self, why: str, *, at_once: bool = False) -> None:
         """Count a failure of the platform's storage. After storage that

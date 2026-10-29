@@ -266,6 +266,23 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def resolve(monkeypatch, names: dict[str, list[tuple[str, int]]]) -> list[tuple[str, int]]:
+    """socket.getaddrinfo with each of ``names`` resolved to its loopback
+    addresses, in that order, whatever the port; other names as before.
+    Returns the (host, port) of each lookup of one of them."""
+    real = socket.getaddrinfo
+    asked = []
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host not in names:
+            return real(host, port, *args, **kwargs)
+        asked.append((host, port))
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", a) for a in names[host]]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    return asked
+
+
 # ----- following the redirect ----------------------------------------------- #
 def test_a_redirect_is_followed_with_the_range_and_nothing_else(stub, storage, direct):
     env = connect(stub)
@@ -498,6 +515,29 @@ def test_storage_that_takes_no_connection_costs_the_connect_timeout_once(
     [line] = switch_lines(caplog)
     assert "cannot be reached" in line and "timed out" in line
     assert resumes(caplog) == []
+
+
+# ----- storage's address ---------------------------------------------------- #
+@pytest.mark.parametrize("host", ["::1", "2001:db8::abcd", "::ffff:127.0.0.1"])
+def test_an_ipv6_address_without_a_port(stub, storage, direct, tmp_path, monkeypatch, caplog, host):
+    """A URL with an IPv6 address and no port: the client connects to that
+    address on port 80 (a resolver here sends it to storage) and names it in
+    the Host header as the URL does."""
+    caplog.set_level(logging.INFO, logger="world_engine_client")
+    asked = resolve(monkeypatch, {host: [storage.server.server_address]})
+    url = "/__asset/0.ply"
+    direct.where[url] = f"http://[{host}]"
+    env = connect(stub)
+    try:
+        assets = download(env, tmp_path, [url])
+        assert assets.read(url) == ASSETS[url]
+    finally:
+        env.close()
+    assert asked == [(host, 80)]
+    [got] = storage.requests
+    assert got.status == 200 and got.headers["Host"] == f"[{host}]"
+    assert asks(stub, url) == [(True, None)]
+    assert switch_lines(caplog) == [] and resumes(caplog) == []
 
 
 # ----- what is not followed ------------------------------------------------- #
