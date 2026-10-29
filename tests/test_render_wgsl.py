@@ -11,9 +11,13 @@ warp) also checks which step of the adapter search rendered."""
 
 from __future__ import annotations
 
+import gc
 import os
+import subprocess
+import sys
 import tempfile
 import warnings
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -955,3 +959,206 @@ def test_a_gpu_adapter_does_not_try_chrome(stub, vulkan_misses_the_gpu, monkeypa
     env, _ = _connect_d(stub)
     env.close()
     assert FakeChrome.instances == [] and vulkan_misses_the_gpu == ["open", "draw"]
+
+
+# ----------------------------------- a closed renderer lets its device go at once
+def _process_size() -> tuple[float, int, int] | None:
+    """This process's RSS (MiB), threads and file descriptors; None off Linux."""
+    try:
+        with open("/proc/self/statm") as f:
+            pages = int(f.read().split()[1])
+        return (
+            pages * os.sysconf("SC_PAGE_SIZE") / 2**20,
+            len(os.listdir("/proc/self/task")),
+            len(os.listdir("/proc/self/fd")),
+        )
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+class _Collections:
+    """Counts the garbage collections that run while it is installed."""
+
+    def __init__(self):
+        self.count = 0
+
+    def __call__(self, phase, info):
+        if phase == "start":
+            self.count += 1
+
+    def __enter__(self):
+        self.enabled = gc.isenabled()
+        gc.collect()
+        gc.disable()  # only an explicit collection runs from here on
+        gc.callbacks.append(self)
+        return self
+
+    def __exit__(self, *exc):
+        gc.callbacks.remove(self)
+        if self.enabled:
+            gc.enable()
+
+
+SESSIONS, WARM_UP = 8, 3
+
+
+def test_a_closed_session_lets_its_device_go_at_once(stub, d):
+    """Attach and release, again and again, with the garbage collector off:
+    each close() frees the session's adapter, device and queue without a
+    collection, and the process does not grow. In wgpu-py 0.32 a device and
+    its queue refer to each other, so up to 0.7.0 they lived on until Python's
+    collector ran; this scene then grew the process by about 43 MiB a session
+    on lavapipe, and by 80 MiB, 4 threads and 10 file descriptors on an RTX
+    4090."""
+    DPlatform(stub, encrypted=False)
+    sizes = []
+    with _Collections() as collections:
+        for i in range(SESSIONS):
+            env = connect(stub, platform=False)
+            renderer = env.renderer
+            assert isinstance(renderer, render_wgsl.WGSLRenderer)
+            device = renderer.device
+            refs = {
+                "adapter": weakref.ref(device.adapter),
+                "device": weakref.ref(device),
+                "queue": weakref.ref(device.queue),
+            }
+            del device
+            env.observe()
+            before = collections.count
+            env.close()
+            assert collections.count == before, "close() needed a garbage collection"
+            left = [name for name, ref in refs.items() if ref() is not None]
+            assert left == [], f"session {i}: the {', '.join(left)} outlived close()"
+            renderer.close()  # again: nothing to do
+            with pytest.raises(wec.RendererError, match="closed"):
+                renderer.render({"cameras": CAMS})
+            del renderer, env
+            sizes.append(_process_size())
+    if sizes[0] is None:
+        return  # no /proc: the weak references are the test
+    (rss0, threads0, fds0), (rss, threads, fds) = sizes[WARM_UP - 1], sizes[-1]
+    per_session = (rss - rss0) / (SESSIONS - WARM_UP)
+    assert per_session < 4.0, f"RSS grew by {per_session:.1f} MiB a session: {sizes}"
+    assert threads <= threads0 + 3 and fds <= fds0 + 3, sizes
+
+
+EXIT_SCRIPT = """
+import atexit, gc, sys, warnings
+import world_engine_client as wec
+
+url, out, mode = sys.argv[1:4]
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", RuntimeWarning)
+    # renderer D only: on a CPU adapter the client would try Chrome on the GPU first
+    env = wec.connect("secret", url=url, images=True, render_options={"renderer": "wgsl"})
+env.observe()
+assert type(env.renderer).__name__ == "WGSLRenderer", env.renderer
+
+
+def close(open=open, finalizing=sys.is_finalizing):  # builtins may be gone by then
+    env.close()
+    with open(out, "a") as f:
+        f.write("finalizing\\n" if finalizing() else "closed\\n")
+
+
+if mode == "atexit":
+    atexit.register(close)
+else:  # closed by a finalizer the last collection at interpreter exit runs
+    device = env.renderer.device  # still there after close(): no collection while finalizing
+
+    class Closer:
+        def __init__(self):
+            self.me = self
+
+        def __del__(self):
+            close()
+
+    gc.disable()
+    Closer()
+"""
+
+
+@pytest.mark.parametrize("mode", ["atexit", "finalizer"])
+def test_a_renderer_closes_at_interpreter_exit(stub, d, tmp_path, mode):
+    """close() from an atexit handler, and from a finalizer while the
+    interpreter shuts down, ends the process cleanly. The finalizer's device
+    is still referenced after close(), which then does not collect: not
+    while the interpreter is finalizing."""
+    DPlatform(stub, encrypted=False)
+    out = tmp_path / "closed.txt"
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(root / "src"), *filter(None, [env.get("PYTHONPATH")])])
+    done = subprocess.run(
+        [sys.executable, "-c", EXIT_SCRIPT, stub.url, str(out), mode],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert done.returncode == 0, done.stderr[-3000:]
+    assert "Traceback" not in done.stderr and "Exception ignored" not in done.stderr, done.stderr
+    want = "closed" if mode == "atexit" else "finalizing"
+    assert out.read_text().split() == [want], done.stderr[-3000:]
+
+
+def test_the_device_d_failed_on_goes_before_the_next_adapter_draws(
+    stub, pipelines_fail, monkeypatch
+):
+    """When renderer D's pipelines fail on the GPU and WARP draws instead, the
+    GPU's adapter and device are freed then, not at the next collection: the
+    search keeps the reasons, not the exceptions, whose frames hold them."""
+    opened = []
+    stand_in = render_wgsl.open_adapter  # the fixture's
+
+    def tracked(**kw):
+        adapter, choice = stand_in(**kw)
+        opened.append(weakref.ref(adapter))
+        return adapter, choice
+
+    monkeypatch.setattr(render_wgsl, "open_adapter", tracked)
+    with _Collections():
+        env, texts = _connect_d(stub)
+        try:
+            assert env.renderer.choice.device == "Microsoft Basic Render Driver"
+            assert len(opened) == 2 and "error X3500" in texts[0], texts
+            assert opened[0]() is None, "the device D failed on outlived the fallback"
+        finally:
+            env.close()
+        assert opened[1]() is None
+
+
+def test_the_device_of_a_scene_d_cannot_draw_goes_before_chrome_draws(stub, chrome, monkeypatch):
+    """A scene renderer D cannot draw goes to the browser path; the device D
+    opened for it is freed then, not at the next collection."""
+    from world_engine_client.wgsl import render_wgsl as core
+
+    devices = []
+
+    class Device:
+        def destroy(self):
+            pass
+
+    def create_device(adapter):
+        device = Device()
+        devices.append(weakref.ref(device))
+        return device
+
+    class Undrawable:
+        def __init__(self, scene_init, read, *, device, **kw):
+            raise ValueError("a mesh renderer D does not draw")
+
+    monkeypatch.setattr(render_wgsl, "available", lambda: True)
+    monkeypatch.setattr(render_wgsl, "find_adapter", lambda **kw: GPU)
+    monkeypatch.setattr(render_wgsl, "open_adapter", lambda choice=None, **kw: (Device(), choice))
+    monkeypatch.setattr(core, "create_device", create_device)
+    monkeypatch.setattr(core, "WgslRenderer", Undrawable)
+    with _Collections():
+        env, texts = _connect_d(stub)
+        try:
+            assert isinstance(env.renderer, FakeChrome)
+            assert any("a mesh renderer D does not draw" in t for t in texts), texts
+            assert len(devices) == 1 and devices[0]() is None, "D's device outlived the fallback"
+        finally:
+            env.close()

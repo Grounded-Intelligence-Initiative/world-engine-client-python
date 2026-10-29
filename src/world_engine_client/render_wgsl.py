@@ -37,13 +37,16 @@ assets, Pillow for mesh textures): ``pip install 'world-engine-client[render]'``
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sqlite3
 import struct
+import sys
 import threading
 import time
 import warnings
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -223,10 +226,13 @@ def start_renderer(
 
     search = {"adapter": adapter, "allow_software": allow_software, "cache_dir": cache_dir}
     probe_timeout = min(float(timeout), 120.0)
-    failures: list[PipelineError] = []
+    # The reasons, not the exceptions: kept here, their tracebacks and this
+    # frame would hold each other, and the device D failed on, until a
+    # garbage collection.
+    failures: list[str] = []
 
     def failed_on() -> str:
-        return "; ".join(f.reason for f in failures)
+        return "; ".join(failures)
 
     while True:
         try:
@@ -236,7 +242,7 @@ def start_renderer(
             )
         except PipelineError as exc:
             adapters.mark_failed(exc.choice, exc.error)
-            failures.append(exc)
+            failures.append(exc.reason)
             try:
                 choice = find_adapter(timeout=probe_timeout, **search)
             except NoRenderAdapter as none:
@@ -461,7 +467,8 @@ class WGSLRenderer:
                 ) from None
             self.load_seconds = time.perf_counter() - started
         except BaseException as exc:
-            self.close()
+            # No collection: the frames of exc hold the device until it is dropped.
+            self._close(collect=False)
             if type(exc).__module__.split(".")[0] == "wgpu":  # a pipeline, a validation error
                 error = f"{type(exc).__name__}: {' '.join(str(exc).split())}"[:600]
                 raise PipelineError(
@@ -523,23 +530,60 @@ class WGSLRenderer:
         return images
 
     def close(self) -> None:
-        if self._scene is not None:
-            self._scene.close()
-            self._scene = None
-        if self.assets is not None:
-            self.assets.close()  # the key and anything held in memory
-        if self.device is not None:
-            try:
-                self.device.destroy()
-            except Exception:  # noqa: BLE001 - already lost
-                pass
-            self.device = None
+        """Free the scene's GPU memory, the key and the device, at once.
+        Calling it again does nothing."""
+        self._close(collect=True)
+
+    def _close(self, *, collect: bool) -> None:
+        scene, self._scene = self._scene, None
+        device, self.device = self.device, None
+        self._adapter = None
+        try:
+            if scene is not None:
+                scene.close()
+            if self.assets is not None:
+                self.assets.close()  # the key and anything held in memory
+        finally:
+            scene = None  # its buffers and textures go here
+            if device is not None:
+                try:
+                    device.destroy()
+                except Exception:  # noqa: BLE001 - already lost
+                    pass
+                left = _unlink(device)
+                device = None
+                if collect and left is not None and left() is not None:
+                    if not sys.is_finalizing():
+                        gc.collect()  # a cycle _unlink does not know (another wgpu-py)
 
     def __enter__(self) -> WGSLRenderer:
         return self
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def _unlink(device):
+    """Break the reference cycles that keep a destroyed wgpu-py 0.32 device
+    alive, and return a weak reference to it (None if it takes none).
+
+    The device's ``_device`` is the device itself, and its queue's
+    ``_device`` is the device too, so dropping the last reference to a device
+    frees neither. The native device, with its memory, threads and file
+    descriptors (tens of MiB a session on a GPU), then stays until Python's
+    cyclic garbage collector runs. Without those two references the device,
+    its queue and its adapter go with the caller's last reference."""
+    queue = getattr(device, "_queue", None)
+    for obj in (queue, device):
+        try:
+            if getattr(obj, "_device", None) is device:
+                obj._device = None
+        except Exception:  # noqa: BLE001 - another wgpu-py: the caller collects
+            pass
+    try:
+        return weakref.ref(device)
+    except TypeError:
+        return None
 
 
 def drawn_assets(scene_init: dict, digests: dict[str, str]) -> dict[str, str]:

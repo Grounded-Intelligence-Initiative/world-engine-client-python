@@ -537,7 +537,10 @@ class RemoteEnv:
             except (NoRenderAdapter, SceneNotDrawable) as exc:
                 if not chrome_ok:
                     raise
-                d_failure = exc
+                # The reason, not the exception: kept here, its traceback and
+                # this frame would hold each other, and the device D opened,
+                # until a garbage collection.
+                d_failure = (exc.reason, exc.fixes)
                 self._render_reason = f"renderer D cannot draw here: {exc.reason}"
                 warnings.warn(
                     f"renderer D cannot draw camera images here ({exc.reason}), so they come "
@@ -550,10 +553,11 @@ class RemoteEnv:
         except RendererError as exc:
             if d_failure is None:
                 raise
-            fixes = list(dict.fromkeys([*d_failure.fixes, *exc.fixes]))
+            d_reason, d_fixes = d_failure
+            fixes = list(dict.fromkeys([*d_fixes, *exc.fixes]))
             fixes.sort(key=lambda fix: "images=False" in fix)  # the state-only way out last
             raise NoRenderAdapter(
-                f"nothing renders camera images here. Renderer D: {d_failure.reason}. "
+                f"nothing renders camera images here. Renderer D: {d_reason}. "
                 f"Headless Chrome: {exc.reason}",
                 code="renderer_unavailable",
                 fixes=fixes,
