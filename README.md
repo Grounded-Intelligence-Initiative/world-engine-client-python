@@ -256,6 +256,18 @@ process that dies during a download does not hold up the others. A broken
 download resumes where it stopped; one that sends nothing for 60 seconds
 fails. Downloads do not count against the renderer's start time.
 
+When the DigiArena platform offers it, a scene asset comes straight from the
+platform's storage: the platform answers with a URL there, valid for
+minutes, and the client downloads the file from it on a new connection. Of
+the request's headers only the Range goes along, so your token and
+credentials stay with the platform, and from an https platform only https
+URLs are followed. It is the same DAC1 file, checked and cached the same
+way. A URL that fails is not used again: the platform signs a new one, and
+the download resumes. If storage cannot be reached from your network (the
+client gives it 10 seconds to connect), or fails twice, the session's scene
+assets stream from the platform instead, as with earlier clients, and the
+`world_engine_client.env` logger says so once, at INFO level.
+
 A file not used for 30 days is deleted unless its scene is pinned. The check
 runs in the background when a renderer starts, at most once a day, after the
 session's own files are in place: the scene you open is not deleted, however

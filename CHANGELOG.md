@@ -2,8 +2,22 @@
 
 ## 0.7.1
 
-Three fixes, and documentation.
+Scene assets straight from the platform's storage, three fixes, and
+documentation.
 
+- When the DigiArena platform offers it, scene assets come straight from its
+  storage. A request for one says that the client follows a redirect
+  (`X-We-Render-Redirect: 1`), and the platform may answer with a URL there,
+  valid for minutes. The client fetches it on a new connection, and of the
+  request's headers only the Range goes along, so the session's token and
+  Authorization header stay with the platform; an https platform's URL must be
+  https too. The bytes are the same DAC1 file, checked and cached as before. A
+  URL that fails is not used again; the platform signs a new one, and the
+  download resumes where it stopped. Where storage cannot be reached (10 s to
+  connect), or after its second failure, the session streams its scene assets
+  from the platform, as 0.7.0 does, and the `world_engine_client.env` logger
+  says so in one INFO line. Clients up to 0.7.0 send no such header and keep
+  getting the stream.
 - Renderer D frees its GPU device when the session closes. In wgpu-py 0.32 a
   device and its queue refer to each other, so up to 0.7.0 the device, its
   queue and its adapter outlived `close()` until Python's cyclic garbage
