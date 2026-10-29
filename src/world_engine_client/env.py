@@ -876,10 +876,12 @@ class RemoteEnv:
             conn.sock.settimeout(max(self._timeout, 60))  # each piece, as from the platform
             conn.request("GET", target, headers=sent)
             response = conn.getresponse()
-        except (http.client.InvalidURL, ValueError):  # their messages hold the URL
+        except http.client.InvalidURL:  # its message holds the URL
             why = "the platform redirected to an unusable URL"
-        except (OSError, http.client.HTTPException) as exc:
+        except (OSError, http.client.HTTPException) as exc:  # certificate errors before ValueError
             why = f"storage at {host} cannot be reached: {exc!r}"
+        except ValueError:  # one about the URL holds it
+            why = "the platform redirected to an unusable URL"
         except BaseException:
             if conn is not None:
                 conn.close()

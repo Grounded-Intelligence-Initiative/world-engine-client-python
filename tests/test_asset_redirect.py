@@ -749,6 +749,37 @@ def test_an_https_platform_is_not_followed_to_http(tls, tmp_path, caplog, monkey
         plain.close()
 
 
+def test_a_certificate_that_does_not_verify_is_storage_out_of_reach(
+    tls, stub, tmp_path, monkeypatch, caplog
+):
+    """Storage on https with a certificate this machine does not trust (as
+    behind a proxy that intercepts TLS to storage): the env streams from then
+    on, and the log line says that storage cannot be reached and why, not
+    that the URL was unusable."""
+    caplog.set_level(logging.INFO, logger="world_engine_client")
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    secure = Storage(tls.context)
+    try:
+        Direct(stub, Platform(stub), secure)
+        env = connect(stub)
+        try:
+            assets = download(env, tmp_path)
+            for u in URLS:
+                assert assets.read(u) == ASSETS[u]
+        finally:
+            env.close()
+    finally:
+        secure.close()
+    assert secure.requests == []
+    assert asks(stub, URLS[0]) == [(True, None), (False, None)]
+    assert all(asks(stub, u) == [(False, None)] for u in URLS[1:])
+    [line] = switch_lines(caplog)
+    assert "storage at 127.0.0.1 cannot be reached" in line
+    assert "CERTIFICATE_VERIFY_FAILED" in line
+    assert "X-Amz-Signature" not in caplog.text and resumes(caplog) == []
+
+
 @pytest.mark.parametrize(
     "base",
     [
