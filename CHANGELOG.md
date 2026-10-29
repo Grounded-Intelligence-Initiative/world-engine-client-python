@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.7.1
+
+Documentation only. The code is 0.7.0's; the README, the docstrings and the
+version number changed. They now cover what an engine with mobile bases and
+several robots sends, which 0.7.0 already handles. The numbers below were
+checked with 0.7.0 against such an engine, in a TidyBot scene, a scene with
+two Pandas and one with a TidyBot and a Panda.
+
+- Scenes with a mobile base: a connect without `control_mode` gets
+  `osc_pose_delta_base_vel`, `Box(-1, 1, (10,))`, laid out
+  `[dpos(3), drot(3), gripper(1), base_vx, base_vy, base_wz]`. The arm's part
+  is `osc_pose_delta`'s in the robot's base frame (±1 is 0.05 m and 0.5 rad
+  per step), the gripper is dim 6, and ±1 on the base is 0.5 m/s forward or
+  sideways and 3.14 rad/s of yaw; the base accelerates at most 0.5 m/s² and
+  2.36 rad/s². A 7-value policy passes `control_mode="osc_pose_delta"`;
+  without it, `step()` raises `ValueError` before sending anything. The
+  README lists the five `robot{i}_base_*` observations.
+- Scenes with several robots: the action is every robot's in scene order
+  (14 values for two Pandas, 17 for a TidyBot with a Panda), the schemas carry
+  `robots`, prefixed `parts`, `gripper_index` and `gripper_indices`, and the
+  observations add `robot{i}_*` for each robot after the first.
+- Cameras: `available_cameras` and `cameras` in the metadata, the default
+  `wrist` (128×128), `robot{i}_wrist` for each robot after the first, and the
+  TidyBot's `robot0_wrist` (256×192) and `robot0_base` (256×144), which follow
+  the links they ride. Renderer D draws each at its own size.
+- `robot0_eef_target_pos` and `robot0_eef_target_quat`, the commanded pose,
+  are in the observation list; `robot0_eef_pos` and `robot0_eef_quat` are the
+  measured one.
+- The docstrings of the package, `connect()`, `RemoteEnv.step()` and
+  `RemoteEnv.action_space` say the same.
+
 ## 0.7.0
 
 - Renderer D: camera images from a server with renderer D (render protocol 2)

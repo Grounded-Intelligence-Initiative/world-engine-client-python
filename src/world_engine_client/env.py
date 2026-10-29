@@ -6,14 +6,25 @@ semantics require anyway. Obs arrays come back as JSON lists and are converted
 to numpy here. Camera images are rendered on this machine (see render.py): the
 server sends the poses they are drawn from with every observation.
 
-Proto 2 (server ≥ the editor-teleop release): the default control mode is
-``osc_pose_delta`` — a 7-dim action ``[dpos(3), drot_axisangle(3), gripper]``
-in [-1, 1] (robosuite OSC_POSE conventions; dpos scales by ``ee_step`` m,
-drot by ``ee_rot_step`` rad, gripper is a sign-driven rate). Obs use robosuite
-naming (``robot0_eef_pos``, ``robot0_eef_quat`` in scalar-last **xyzw**,
-``robot0_joint_pos`` …). Control mode + obs keys are negotiated at
-:func:`connect` or via :meth:`RemoteEnv.configure`; switches land at episode
-boundaries (immediately before the first reset, else pending until the next).
+Proto 2 (server ≥ the editor-teleop release): the default control mode is the
+server's, the first of ``metadata["supported_control_modes"]``. In a scene of
+fixed-base robots that is ``osc_pose_delta``, a 7-dim action
+``[dpos(3), drot_axisangle(3), gripper]`` in [-1, 1] (robosuite OSC_POSE
+conventions; dpos scales by ``ee_step`` m, drot by ``ee_rot_step`` rad,
+gripper is a sign-driven rate). In a scene with a mobile base it is
+``osc_pose_delta_base_vel``: those 7 values in the robot's base frame, then
+``[base_vx, base_vy, base_wz]``, the base's velocity in its own frame scaled by
+``metadata["base_max_lin_vel"]`` and ``metadata["base_max_ang_vel"]`` (0.5 m/s
+and 3.14 rad/s); the gripper is dim 6 (the schema's ``gripper_index``). With
+several robots an action is every robot's, one after another in the order of
+``metadata["robots"]``, and ``gripper_indices`` names each robot's gripper dim.
+``action_dim`` follows the active mode. Obs use robosuite naming
+(``robot0_eef_pos``, ``robot0_eef_quat`` in scalar-last **xyzw**,
+``robot0_joint_pos`` …; ``robot{i}_*`` for the robots after the first,
+``robot{i}_base_*`` for a robot on a mobile base). Control mode + obs keys are
+negotiated at :func:`connect` or via :meth:`RemoteEnv.configure`; switches
+land at episode boundaries (immediately before the first reset, else pending
+until the next).
 """
 
 from __future__ import annotations
@@ -71,6 +82,14 @@ def connect(
     ``takeover=True`` revokes a controller that died without releasing.
     ``control_mode`` / ``obs_keys`` negotiate the space at connect time (see
     ``env.metadata['supported_control_modes']`` for what the server offers).
+    Without ``control_mode`` the server's default applies: ``osc_pose_delta``
+    (7 values) in a scene of fixed-base robots, ``osc_pose_delta_base_vel``
+    (10 values, the base's velocity after the arm's 7) in a scene with a
+    mobile base; a policy written for 7 values passes
+    ``control_mode="osc_pose_delta"``. With several robots the action has every
+    robot's values in scene order. ``mode="resume"`` keeps the running
+    episode's mode, and a ``control_mode`` passed with it applies from the next
+    :meth:`RemoteEnv.reset`.
 
     Camera images (``images=True`` or ``cameras=[...]``) are rendered on this
     machine; the server only simulates. That needs the ``render`` extra. A
@@ -89,6 +108,11 @@ def connect(
     ``color_format``; for Chrome ``chrome_args`` and ``auto_install``. Scene
     assets are kept in the render cache (:mod:`world_engine_client.cache`): the
     hosting platform's arrive encrypted and stay encrypted on disk.
+    ``images=True`` selects every camera of the scene, those on robot links
+    included (``robot0_wrist`` and ``robot0_base`` of a TidyBot,
+    ``robot{i}_wrist`` of the robots after the first); ``cameras`` selects
+    some by name. ``env.metadata['available_cameras']`` lists them with their
+    sizes, and each ``obs['rgb'][name]`` is ``(height, width, 3) uint8``.
 
     ``normalize_reward`` (default True) returns each reward as the server sends
     it. The server divides a ``staged`` reward by the task's total points, so an
@@ -189,6 +213,15 @@ class RemoteEnv:
         return self._remember(reply), reply.get("info", {})
 
     def step(self, action):
+        """One control interval: ``(obs, reward, terminated, truncated, info)``.
+
+        ``action`` has :attr:`action_dim` finite values, laid out as the active
+        mode's schema says (``metadata["control_mode_schemas"]``): 10 in a scene
+        with a mobile base by default, every robot's values one after another
+        with several robots. Another shape raises ValueError here, before
+        anything is sent. A reply that does not arrive raises
+        RecoveryRequiredError, and so does every later step until :meth:`reset`:
+        the action may have run, so it is never sent again."""
         if self._uncertain:
             raise RecoveryRequiredError(
                 "previous action outcome is uncertain; explicitly reset or reconnect"
@@ -252,7 +285,8 @@ class RemoteEnv:
 
     @property
     def action_space(self):
-        """Gymnasium Box for the active control mode (needs the ``gym`` extra)."""
+        """Gymnasium Box for the active control mode (needs the ``gym`` extra):
+        the mode's bounds, with every robot's gripper dim within ±1."""
         return self._spaces()[0]
 
     @property

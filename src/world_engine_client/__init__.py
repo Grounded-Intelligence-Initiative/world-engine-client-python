@@ -11,6 +11,13 @@ World Engine sim with Gym semantics.
             obs, info = env.reset()
     env.close()
 
+That action is a fixed-base scene's. In a scene with a mobile base the
+default mode is ``osc_pose_delta_base_vel``, 10 values (the base's velocity
+after the arm's 7), and with several robots every robot's action comes one
+after another: ``env.action_dim`` says how many values a step takes, and
+``connect(..., control_mode="osc_pose_delta")`` keeps 7-value policies working
+in a mobile scene.
+
 The token is printed by ``world-engine serve --mode simulator
 --allow-remote-control`` — or shown in the editor Inspector's Python API card
 while a Simulate session runs (you then drive the exact scene the editor user
@@ -56,4 +63,4 @@ __all__ = [
     "axisangle_to_matrix",
     "matrix_to_axisangle",
 ]
-__version__ = "0.7.0"
+__version__ = "0.7.1"

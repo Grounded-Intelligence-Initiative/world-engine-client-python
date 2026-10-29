@@ -32,12 +32,17 @@ import world_engine_client as we_client
 env = we_client.connect("<control token>", url="http://<host>:8080")
 obs, info = env.reset(seed=0)
 for _ in range(200):
-    action = my_policy(obs)   # [-1,1]^7: [dpos(3), drot_axisangle(3), gripper]
+    action = my_policy(obs)   # env.action_dim values in [-1, 1]
     obs, reward, terminated, truncated, info = env.step(action)
     if terminated or truncated:
         obs, info = env.reset()
 env.close()
 ```
+
+In a scene of one fixed-base robot that is 7 values, `[dpos(3),
+drot_axisangle(3), gripper]`. A scene with a mobile base takes 10 by default,
+and a scene with several robots takes every robot's action, one after another
+(see "Action & observation space").
 
 ### Connecting to an editor Simulate session
 
@@ -57,12 +62,19 @@ Resume attachment rejects active human teleoperation with `TeleopActiveError`.
 For hosted DigiArena sessions use `digiarena.attach(hosted_session_id)`; browser
 cookies and editor write credentials are not Python control credentials.
 
+The step above is a fixed-base scene's 7 values. Resume keeps the control mode
+the episode runs with (in a scene with a mobile base the 10-value default,
+unless an earlier controller chose another). A `control_mode` passed with
+`mode="resume"` applies from the next `reset()`, and until then
+`env.action_dim` is the running mode's. The connection example on the
+Inspector's card names the scene's default mode.
+
 Protocol 3 is the default. Direct connections remain reset-required and state-only
 unless requested otherwise. `proto=2` preserves state-only compatibility and
 rejects image/resume requests. `images=True` captures all configured cameras;
-`cameras=['wrist']` selects a subset. RGB arrays appear in `obs['rgb']`; `render()`
-returns the latest camera without stepping. `as_gymnasium()` supplies an optional
-Gymnasium Env.
+`cameras=['wrist']` selects a subset (see "Cameras" for which a scene has).
+RGB arrays appear in `obs['rgb']`; `render()` returns the latest camera without
+stepping. `as_gymnasium()` supplies an optional Gymnasium Env.
 
 ### Camera images
 
@@ -294,8 +306,11 @@ Pending recording data blocks reset with `RecordingPendingError` and is preserve
 
 ## Action & observation space
 
-The default control mode is **`osc_pose_delta`** — robosuite OSC_POSE
-conventions:
+A connect without `control_mode` gets the server's default, the first of
+`env.metadata["supported_control_modes"]`: `osc_pose_delta` in a scene of
+fixed-base robots, `osc_pose_delta_base_vel` in a scene with a mobile base
+(see "Scenes with a mobile base"). `osc_pose_delta` follows the robosuite
+OSC_POSE conventions:
 
 - action = `[dpos(3), drot_axisangle(3), gripper(1)]`, all in `[-1, 1]`;
 - `dpos`: EE translation delta, ±1 → ±`ee_step` m/step (default 0.05);
@@ -304,12 +319,21 @@ conventions:
 - `gripper`: a sign-driven rate — each step moves the internal command by 0.2
   in the sign's direction (full open↔close ≈ 10 steps); 0 = no change.
 
+One step is one control interval, `env.metadata["control_interval"]`
+(0.034 s). `step()` checks the action's shape against `env.action_dim` and
+raises `ValueError` before anything is sent when it does not match.
+
 Observations follow robosuite naming: `robot0_eef_pos` (3), `robot0_eef_quat`
-(4, scalar-last **xyzw**), `robot0_gripper_qpos`, `robot0_joint_pos`,
+(4, scalar-last **xyzw**), `robot0_eef_target_pos` (3),
+`robot0_eef_target_quat` (4, xyzw), `robot0_gripper_qpos`, `robot0_joint_pos`,
 `robot0_joint_vel`, `robot0_sew_pos` (9, shoulder/elbow/wrist world keypoints,
 when a preset robot is attached), `object` (pos(3)+quat(4, xyzw) per body,
-sorted-id order). The proto-1 keys (`proprio` with wxyz quat, `object_state`,
-`joint_positions`) remain as compatibility aliases for one release.
+sorted-id order). `robot0_eef_pos` and `robot0_eef_quat` are the end effector
+as measured, the pose of the gripper body the target commands;
+`robot0_eef_target_*` is the commanded pose the arm tracks. The two differ
+when the target is out of reach. The server also sends the proto-1 keys
+(`proprio` with wxyz quat, `object_state`, `joint_positions`) as
+compatibility aliases.
 
 ### Negotiating the space
 
@@ -324,15 +348,136 @@ obs, info = env.reset()          # the switch is live here
 print(env.action_dim, env.control_mode, env.observation_keys)
 ```
 
-Supported modes are advertised in `env.metadata["supported_control_modes"]`
-with per-mode schemas in `env.metadata["control_mode_schemas"]`:
+Supported modes are advertised in `env.metadata["supported_control_modes"]`,
+the default first, with per-mode schemas in
+`env.metadata["control_mode_schemas"]` (`action_dim`, `layout`, `parts`,
+`bounds`, `frame`, `units` and, where they apply, `gripper_index` and
+`gripper_indices`):
 
-- `osc_pose_delta` — 7-dim normalized deltas (default);
-- `osc_pose_abs` — 7-dim absolute `[pos(3), rot_axisangle(3), gripper]`
+- `osc_pose_delta_base_vel`: 10-dim, `osc_pose_delta` in the robot's base
+  frame and then the base's velocity. Only in a scene with a mobile base,
+  where it is the default;
+- `osc_pose_delta`: 7-dim normalized deltas (the default in a fixed-base
+  scene);
+- `osc_pose_abs`: 7-dim absolute `[pos(3), rot_axisangle(3), gripper]`
   targets (unscaled, robosuite v1.5 `input_type="absolute"`);
-- `ee_pos_delta` — the legacy 4-dim `[dx, dy, dz, gripper]` action.
+- `ee_pos_delta`: the legacy 4-dim `[dx, dy, dz, gripper]` action.
 
-Unknown names raise `BadConfigError` listing the supported values.
+The dims are per robot: with several robots each mode takes every robot's
+action (see "Scenes with several robots"). Unknown names raise
+`BadConfigError` listing the supported values.
+
+### Scenes with a mobile base
+
+A scene with a robot on a mobile base (the `stanford_tidybot` preset: a Kinova
+Gen3 arm and a Robotiq 2F-85 gripper on an omnidirectional base) lists
+`osc_pose_delta_base_vel` first. A connect without `control_mode` gets it:
+`env.action_dim` is 10 and `env.action_space` is `Box(-1, 1, (10,), float32)`.
+
+| Dims | Part | ±1 is |
+| --- | --- | --- |
+| 0–2 | `dpos`: the EE target's translation, in the base frame | ±`ee_step` m per step (0.05) |
+| 3–5 | `drot`: axis-angle rotation of the target, in the base frame | ±`ee_rot_step` rad per step (0.5) |
+| 6 | `gripper`: the sign-driven rate of `osc_pose_delta` | −1 opens, +1 closes |
+| 7 | `base_vx`: forward velocity, in the base frame | ±`base_max_lin_vel` (0.5 m/s) |
+| 8 | `base_vy`: leftward velocity | ±`base_max_lin_vel` (0.5 m/s) |
+| 9 | `base_wz`: counterclockwise yaw rate | ±`base_max_ang_vel` (3.14 rad/s) |
+
+The first 7 values are those of `osc_pose_delta`, but in the robot's base
+frame, so the target rides with the base. The gripper is not the last value:
+the schema's `gripper_index` is 6. At full speed the base covers 0.017 m and
+turns 0.107 rad per 0.034 s step. Each axis accelerates at most
+`base_max_lin_acc` (0.5 m/s²) or `base_max_ang_acc` (2.36 rad/s²), so from
+rest a held `base_vx` of 1 reaches 0.5 m/s after about 30 steps, a second;
+read `robot0_base_vel` rather than assume the command. The limits are in
+`env.metadata`, next to `mobile_base: True` and `mobile_robots` (the ids of
+the robots on a mobile base).
+
+The other three modes keep the world frame, and the base holds still in them.
+A policy written for 7 values passes `control_mode="osc_pose_delta"` (4 values:
+`"ee_pos_delta"`). Without it, its first `step()` raises `ValueError` (the
+action must have shape `(10,)`) before anything is sent.
+
+```python
+env = we_client.connect(token, url=..., control_mode="osc_pose_delta")
+```
+
+Each robot on a mobile base adds five observations after its other keys:
+
+| Key | Shape | Meaning |
+| --- | --- | --- |
+| `robot0_base_pos` | 3 | the base's measured position in the world |
+| `robot0_base_quat` | 4 | its orientation, xyzw |
+| `robot0_base_vel` | 3 | `[vx, vy, wz]` as measured, in the base frame |
+| `robot0_base_to_eef_pos` | 3 | the measured end effector in the base frame |
+| `robot0_base_to_eef_quat` | 4 | its orientation in the base frame, xyzw |
+
+They come from the measured pose, as `robot0_eef_pos` does. A fixed-base
+scene has none of them and answers `obs_keys` that name one with
+`BadConfigError`.
+
+### Scenes with several robots
+
+A scene with more than one robot takes every robot's action, one after another
+in scene order, the first robot first. `env.metadata["robots"]` lists the
+robot ids in that order (a scene with one robot has no `robots`). Each schema
+in `env.metadata["control_mode_schemas"]` then reports:
+
+- `action_dim`: the sum of the robots' parts;
+- `parts` with a robot prefix, from `robot0_dpos` to the last robot's
+  `gripper`;
+- `robots`: the robot ids in that order;
+- `gripper_index`: the first robot's gripper dim;
+- `gripper_indices`: every robot's gripper dim.
+
+| Scene | Default mode | Action | Gripper dims |
+| --- | --- | --- | --- |
+| two Pandas | `osc_pose_delta` | 14 values (7 + 7) | 6, 13 |
+| a TidyBot, then a Panda | `osc_pose_delta_base_vel` | 17 values (10 + 7) | 6, 16 |
+
+In `osc_pose_delta_base_vel` a robot on a mobile base takes 10 values and a
+fixed-base robot 7, whose arm values stay in the world frame: the schema's
+`frames` lists each robot's arm frame (`["base", "world"]` above), and its
+`frame` is the first robot's. In `osc_pose_delta` and `osc_pose_abs` every
+robot takes 7 values, in `ee_pos_delta` 4.
+
+`env.action_space` keeps every gripper dim within ±1, by the rule the server
+checks actions with: the schema's `gripper_indices`, else its `gripper_index`,
+else the last dim. In `osc_pose_abs` the other dims are unbounded. Clients
+0.4.2 to 0.6.0 bounded only the last dim, so with several robots in
+`osc_pose_abs` a sampled action could fail the server's check.
+
+Observations add `robot{i}_eef_pos`, `robot{i}_eef_quat`,
+`robot{i}_eef_target_pos`, `robot{i}_eef_target_quat`, `robot{i}_gripper_qpos`,
+`robot{i}_joint_pos`, `robot{i}_joint_vel` and `robot{i}_sew_pos` for each robot
+after the first, where `i` is the robot's place in `robots`, and the five
+`robot{i}_base_*` keys for each robot on a mobile base. The `robot0_*` keys and
+the compatibility fields stay the first robot's.
+
+### Cameras
+
+`images=True` asks for every camera of the scene and `cameras=[...]` for some
+of them. `env.metadata["available_cameras"]` lists every camera with its
+`width` and `height`, `env.metadata["cameras"]` the ones this session draws,
+and `obs["rgb"][name]` is a `(height, width, 3) uint8` array.
+
+- A scene of one fixed-base robot has the scene's cameras (by default
+  `third_person` and `top_down`, 256×256) and `wrist` (by default 128×128),
+  which rides the hand. A scene camera named `wrist` replaces it.
+- Every robot after the first has its own `robot{i}_wrist` on its hand, and
+  `robot{i}_<name>` for the cameras its model brings.
+- A first robot on a mobile base has no `wrist`: its own `robot0_wrist` takes
+  the place, and its model's other cameras come too. The TidyBot brings
+  `robot0_wrist` (256×192, 41.8° vertical field of view, beside its gripper)
+  and `robot0_base` (256×144, 52.2°, on the base, looking ahead and down).
+  `third_person` and `top_down` keep their pose relative to the robot's
+  starting pose. `cameras=["wrist"]` there raises `BadConfigError`, whose
+  fixes point at `robot0_wrist`.
+
+A camera on a robot link follows the link's measured pose: every observation's
+`render_state` carries each camera's pose, and the client draws the camera
+there, so `robot0_wrist` and `robot0_base` move with the arm and the base.
+Renderer D draws each camera at its own size.
 
 ### 6D rotation helpers
 
